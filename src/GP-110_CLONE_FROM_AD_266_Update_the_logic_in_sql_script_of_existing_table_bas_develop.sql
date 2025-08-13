@@ -1,19 +1,15 @@
 USE CATALOG purgo_databricks;
 
-/*
+/* 
   Enhanced SQL Transformation for purgo_playground.pat_account
-  - Implements updated transformation logic for prescriber_id, prescriber_key, patient_sf_id, hash_key, last_modified_date
-  - Applies mapping rules from source_target_mapping_specifications.xlsx
-  - Handles error logging and ETL event logging
-  - Only records where patinet_c contains 'PAT' are eligible for transformation
-  - All string fields use STRING type, last_modified_date uses TIMESTAMP
-  - All transformation logic is documented in column comments
-  - Ensures schema consistency and data quality
+  - Updates transformation logic for prescriber_id, patient_sf_id, hash_key, last_modified_date
+  - Implements error logging for invalid data
+  - All logic aligns with source_target_mapping_specifications.xlsx
   - Catalog: purgo_databricks
   - Schema: purgo_playground
 */
 
-/* ---------- DDL: Create pat_account table with updated schema ---------- */
+/* ------------------ DDL: Create/Update Target Table ------------------ */
 CREATE TABLE IF NOT EXISTS purgo_playground.pat_account (
   patient_foundation_shipment STRING,
   prescriber_id STRING,
@@ -26,18 +22,17 @@ CREATE TABLE IF NOT EXISTS purgo_playground.pat_account (
   last_modified_date TIMESTAMP
 );
 
--- Add column comments for documentation
 COMMENT ON COLUMN purgo_playground.pat_account.patient_foundation_shipment IS 'Straight move from source';
-COMMENT ON COLUMN purgo_playground.pat_account.prescriber_id IS 'Convert name to uppercase, prefix "DR." only if not present';
-COMMENT ON COLUMN purgo_playground.pat_account.prescriber_key IS 'Convert address to uppercase, prefix "DR." only if not present';
-COMMENT ON COLUMN purgo_playground.pat_account.patient_sf_id IS 'Set only if patinet_c contains "PAT"; else NULL';
+COMMENT ON COLUMN purgo_playground.pat_account.prescriber_id IS 'Convert name to uppercase, then prefix "DR." only if not present. Valid values: Uppercase, prefixed with "DR."';
+COMMENT ON COLUMN purgo_playground.pat_account.prescriber_key IS 'If "Dr." not in prefix, include "DR." in prefix from case in prescriber_name_c_address. Valid values: Uppercase, prefixed with "DR."';
+COMMENT ON COLUMN purgo_playground.pat_account.patient_sf_id IS 'Use value only if patinet_c contains "PAT"; otherwise set to NULL';
 COMMENT ON COLUMN purgo_playground.pat_account.service_request_type IS 'Straight move from source';
 COMMENT ON COLUMN purgo_playground.pat_account.case_sf_id IS 'Straight move from source';
 COMMENT ON COLUMN purgo_playground.pat_account.account_id IS 'Straight move from source';
-COMMENT ON COLUMN purgo_playground.pat_account.hash_key IS 'Concatenation of patinet_c, recordtypeid, id with underscores (_); NULLs replaced by empty string';
-COMMENT ON COLUMN purgo_playground.pat_account.last_modified_date IS 'Set to current timestamp for all transformed records';
+COMMENT ON COLUMN purgo_playground.pat_account.hash_key IS 'Concatenation of patinet_c, recordtypeid, id with underscore (_)';
+COMMENT ON COLUMN purgo_playground.pat_account.last_modified_date IS 'Set to ETL execution timestamp in ISO 8601 format';
 
-/* ---------- DDL: Create error log and ETL log tables if not exist ---------- */
+/* ------------------ DDL: Error Log Table ------------------ */
 CREATE TABLE IF NOT EXISTS purgo_playground.pat_account_error_log (
   hash_key STRING,
   error_col STRING NOT NULL,
@@ -45,160 +40,73 @@ CREATE TABLE IF NOT EXISTS purgo_playground.pat_account_error_log (
   event_time TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS purgo_playground.pat_account_etl_log (
-  log_ts TIMESTAMP,
-  patient_sf_id STRING,
-  prescriber_id STRING,
-  hash_key STRING,
-  last_modified_date TIMESTAMP,
-  account_id STRING,
-  error_message STRING
-);
-
-/* ---------- CTE: Source Data Extraction ---------- */
-WITH source_pat_account AS (
+/* ------------------ CTE: Source Data Transformation ------------------ */
+WITH transformed_pat_account AS (
   SELECT
-    patient_foundation_shipment,
-    prescriber_name_c,
-    prescriber_name_c_address,
-    patinet_c,
-    recordtypeid,
-    id,
-    accountid
-  FROM purgo_playground.p_account
-),
+    -- patient_foundation_shipment: straight move
+    p.patient_foundation_shipment AS patient_foundation_shipment,
 
-/* ---------- CTE: Transformation Logic ---------- */
-transformed_pat_account AS (
-  SELECT
-    -- patient_foundation_shipment: straight move if patinet_c contains 'PAT', else NULL
-    CASE WHEN patinet_c LIKE '%PAT%' THEN patient_foundation_shipment ELSE NULL END AS patient_foundation_shipment,
-
-    -- prescriber_id: uppercase, prefix 'DR.' only if not present (case-insensitive)
+    /* prescriber_id transformation:
+       - Convert to uppercase
+       - Prefix "DR." only if not present (case-insensitive)
+       - No duplicate prefix
+       - NULL if prescriber_name_c is NULL
+    */
     CASE
-      WHEN prescriber_name_c IS NULL THEN NULL
-      WHEN UPPER(TRIM(prescriber_name_c)) LIKE 'DR.%' THEN UPPER(TRIM(prescriber_name_c))
-      ELSE CONCAT('DR.', UPPER(TRIM(prescriber_name_c)))
+      WHEN p.prescriber_name_c IS NULL THEN NULL
+      WHEN UPPER(TRIM(p.prescriber_name_c)) LIKE 'DR.%' THEN UPPER(TRIM(p.prescriber_name_c))
+      ELSE CONCAT('DR.', UPPER(TRIM(p.prescriber_name_c)))
     END AS prescriber_id,
 
-    -- prescriber_key: uppercase, prefix 'DR.' only if not present (case-insensitive)
+    /* prescriber_key transformation:
+       - Convert to uppercase
+       - Prefix "DR." only if not present (case-insensitive)
+       - NULL if prescriber_name_c_address is NULL
+    */
     CASE
-      WHEN prescriber_name_c_address IS NULL THEN NULL
-      WHEN UPPER(TRIM(prescriber_name_c_address)) LIKE 'DR.%' THEN UPPER(TRIM(prescriber_name_c_address))
-      ELSE CONCAT('DR.', UPPER(TRIM(prescriber_name_c_address)))
+      WHEN p.prescriber_name_c_address IS NULL THEN NULL
+      WHEN UPPER(TRIM(p.prescriber_name_c_address)) LIKE 'DR.%' THEN UPPER(TRIM(p.prescriber_name_c_address))
+      ELSE CONCAT('DR.', UPPER(TRIM(p.prescriber_name_c_address)))
     END AS prescriber_key,
 
-    -- patient_sf_id: only if patinet_c contains 'PAT', else NULL
-    CASE WHEN patinet_c LIKE '%PAT%' THEN patinet_c ELSE NULL END AS patient_sf_id,
+    /* patient_sf_id transformation:
+       - Use value only if patinet_c contains 'PAT'
+       - NULL if patinet_c is NULL or does not contain 'PAT'
+    */
+    CASE
+      WHEN p.patinet_c IS NULL THEN NULL
+      WHEN p.patinet_c LIKE '%PAT%' THEN p.patinet_c
+      ELSE NULL
+    END AS patient_sf_id,
 
     -- service_request_type: straight move
-    recordtypeid AS service_request_type,
+    p.recordtypeid AS service_request_type,
 
     -- case_sf_id: straight move
-    id AS case_sf_id,
+    p.id AS case_sf_id,
 
     -- account_id: straight move
-    accountid AS account_id,
+    p.accountid AS account_id,
 
-    -- hash_key: concatenation of patinet_c, recordtypeid, id with underscores; NULLs handled
-    CONCAT(
-      COALESCE(patinet_c, ''),
-      '_',
-      COALESCE(recordtypeid, ''),
-      '_',
-      COALESCE(id, '')
-    ) AS hash_key,
+    /* hash_key transformation:
+       - Concatenate patinet_c, recordtypeid, id with underscore (_)
+       - NULL if any of the three is NULL
+    */
+    CASE
+      WHEN p.patinet_c IS NULL OR p.recordtypeid IS NULL OR p.id IS NULL THEN NULL
+      ELSE CONCAT(p.patinet_c, '_', p.recordtypeid, '_', p.id)
+    END AS hash_key,
 
-    -- last_modified_date: always current timestamp in Databricks format
+    /* last_modified_date transformation:
+       - Set to ETL execution timestamp
+       - NULL if ETL timestamp is not available (should not happen in Databricks)
+    */
     CURRENT_TIMESTAMP() AS last_modified_date
 
-  FROM source_pat_account
-),
-
-/* ---------- CTE: Error Detection Logic ---------- */
-error_pat_account AS (
-  SELECT
-    -- hash_key: always generated, even if some fields are NULL
-    CONCAT(
-      COALESCE(patinet_c, ''),
-      '_',
-      COALESCE(recordtypeid, ''),
-      '_',
-      COALESCE(id, '')
-    ) AS hash_key,
-
-    -- error_col: which column is in error
-    CASE
-      WHEN patinet_c IS NULL OR patinet_c NOT LIKE '%PAT%' THEN 'patient_sf_id'
-      WHEN prescriber_name_c IS NULL THEN 'prescriber_id'
-      WHEN prescriber_name_c_address IS NULL THEN 'prescriber_key'
-      WHEN recordtypeid IS NULL THEN 'hash_key'
-      WHEN id IS NULL THEN 'hash_key'
-      ELSE NULL
-    END AS error_col,
-
-    -- error_message: detailed error
-    CASE
-      WHEN patinet_c IS NULL THEN 'patinet_c is NULL for hash_key'
-      WHEN patinet_c NOT LIKE '%PAT%' THEN 'patinet_c does not contain ''PAT'''
-      WHEN prescriber_name_c IS NULL THEN 'prescriber_name_c is NULL'
-      WHEN prescriber_name_c_address IS NULL THEN 'prescriber_name_c_address is NULL'
-      WHEN recordtypeid IS NULL THEN 'recordtypeid is NULL for hash_key'
-      WHEN id IS NULL THEN 'id is NULL for hash_key'
-      ELSE NULL
-    END AS error_message,
-
-    -- event_time: current timestamp
-    CURRENT_TIMESTAMP() AS event_time
-
-  FROM source_pat_account
-  WHERE
-    patinet_c IS NULL
-    OR patinet_c NOT LIKE '%PAT%'
-    OR prescriber_name_c IS NULL
-    OR prescriber_name_c_address IS NULL
-    OR recordtypeid IS NULL
-    OR id IS NULL
-),
-
-/* ---------- CTE: ETL Event Logging ---------- */
-etl_pat_account AS (
-  SELECT
-    CURRENT_TIMESTAMP() AS log_ts,
-    -- patient_sf_id: only if patinet_c contains 'PAT'
-    CASE WHEN patinet_c LIKE '%PAT%' THEN patinet_c ELSE NULL END AS patient_sf_id,
-    -- prescriber_id: transformation as above
-    CASE
-      WHEN prescriber_name_c IS NULL THEN NULL
-      WHEN UPPER(TRIM(prescriber_name_c)) LIKE 'DR.%' THEN UPPER(TRIM(prescriber_name_c))
-      ELSE CONCAT('DR.', UPPER(TRIM(prescriber_name_c)))
-    END AS prescriber_id,
-    -- hash_key: always generated
-    CONCAT(
-      COALESCE(patinet_c, ''),
-      '_',
-      COALESCE(recordtypeid, ''),
-      '_',
-      COALESCE(id, '')
-    ) AS hash_key,
-    -- last_modified_date: current timestamp
-    CURRENT_TIMESTAMP() AS last_modified_date,
-    -- account_id: straight move
-    accountid AS account_id,
-    -- error_message: NULL for success, else error
-    CASE
-      WHEN patinet_c IS NULL THEN 'patinet_c is NULL for hash_key'
-      WHEN patinet_c NOT LIKE '%PAT%' THEN 'patinet_c does not contain ''PAT'''
-      WHEN prescriber_name_c IS NULL THEN 'prescriber_name_c is NULL'
-      WHEN prescriber_name_c_address IS NULL THEN 'prescriber_name_c_address is NULL'
-      WHEN recordtypeid IS NULL THEN 'recordtypeid is NULL for hash_key'
-      WHEN id IS NULL THEN 'id is NULL for hash_key'
-      ELSE NULL
-    END AS error_message
-  FROM source_pat_account
+  FROM purgo_playground.p_account p
 )
 
-/* ---------- INSERT: Transformed Data into pat_account ---------- */
+/* ------------------ INSERT: Main Data Load ------------------ */
 INSERT INTO purgo_playground.pat_account (
   patient_foundation_shipment,
   prescriber_id,
@@ -220,43 +128,32 @@ SELECT
   account_id,
   hash_key,
   last_modified_date
-FROM transformed_pat_account
-WHERE patient_sf_id IS NOT NULL;
+FROM transformed_pat_account;
 
-/* ---------- INSERT: Error Records into pat_account_error_log ---------- */
-INSERT INTO purgo_playground.pat_account_error_log (
-  hash_key,
-  error_col,
-  error_message,
-  event_time
-)
+/* ------------------ INSERT: Error Logging for Invalid Data ------------------ */
+-- Log errors for prescriber_id, patient_sf_id, hash_key, last_modified_date
+INSERT INTO purgo_playground.pat_account_error_log
 SELECT
-  hash_key,
-  error_col,
-  error_message,
-  event_time
-FROM error_pat_account
-WHERE error_col IS NOT NULL;
+  t.hash_key,
+  t.error_col,
+  t.error_message,
+  CURRENT_TIMESTAMP() AS event_time
+FROM (
+  SELECT
+    hash_key,
+    -- Error for prescriber_id
+    CASE WHEN prescriber_id IS NULL THEN 'prescriber_id'
+         WHEN patient_sf_id IS NULL THEN 'patient_sf_id'
+         WHEN hash_key IS NULL THEN 'hash_key'
+         WHEN last_modified_date IS NULL THEN 'last_modified_date'
+         ELSE NULL END AS error_col,
+    CASE WHEN prescriber_id IS NULL THEN 'prescriber_name_c is NULL'
+         WHEN patient_sf_id IS NULL THEN 'patinet_c is NULL or does not contain "PAT"'
+         WHEN hash_key IS NULL THEN 'recordtypeid or id or patinet_c is NULL'
+         WHEN last_modified_date IS NULL THEN 'ETL execution timestamp missing'
+         ELSE NULL END AS error_message
+  FROM transformed_pat_account
+) t
+WHERE t.error_col IS NOT NULL;
 
-/* ---------- INSERT: ETL Event Log ---------- */
-INSERT INTO purgo_playground.pat_account_etl_log (
-  log_ts,
-  patient_sf_id,
-  prescriber_id,
-  hash_key,
-  last_modified_date,
-  account_id,
-  error_message
-)
-SELECT
-  log_ts,
-  patient_sf_id,
-  prescriber_id,
-  hash_key,
-  last_modified_date,
-  account_id,
-  error_message
-FROM etl_pat_account;
-
-/* ---------- END OF SCRIPT ---------- */
--- All transformation, error, and ETL logging complete
+/* ------------------ END OF SCRIPT ------------------ */
