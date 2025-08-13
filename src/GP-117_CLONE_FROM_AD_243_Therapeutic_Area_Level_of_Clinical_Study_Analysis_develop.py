@@ -1,74 +1,59 @@
-/*
-    Databricks PySpark Implementation: Therapeutic Area Study Aggregation and Analysis
-    -------------------------------------------------------------------------------
-    - Aggregates study data from purgo_playground.study_therapeutic_analysis
-    - Groups by therapeutic_area, calculates:
-        * total_studies: count of all studies per therapeutic_area
-        * completed_studies: count where study_conduct_status = "Completed"
-        * ongoing_studies: count where study_conduct_status = "Ongoing"
-        * avg_enrolled_subjects: average of enrolled_subjects_qty per therapeutic_area, excluding nulls
-    - Excludes records with null therapeutic_area
-    - Handles nulls and invalid statuses per requirements
-    - Writes results to purgo_playground.study_therapeutic_analysis_results
-    - Includes validation logic using CTE pattern
-    - All code is Databricks-compatible and follows best practices
-*/
+# /*
+# Databricks PySpark Implementation: Therapeutic Area Study Aggregation and Analysis
+#
+# This script reads from purgo_playground.study_therapeutic_analysis,
+# aggregates study data by therapeutic_area, and writes results to
+# purgo_playground.study_therapeutic_analysis_results.
+#
+# Aggregation logic:
+# - Only rows with non-null therapeutic_area and study_title are included
+# - total_studies: count of unique study_title per therapeutic_area
+# - completed_studies: count of studies with study_conduct_status = "Completed"
+# - ongoing_studies: count of studies with study_conduct_status = "Ongoing"
+# - avg_enrolled_subjects: average of enrolled_subjects_qty per therapeutic_area, excluding nulls
+# - Duplicate study_title within a therapeutic_area is counted once for total_studies
+# - Only "Completed" and "Ongoing" statuses are counted for their respective metrics
+# - All other statuses are ignored for completed/ongoing counts
+# - If all enrolled_subjects_qty are null for a therapeutic_area, avg_enrolled_subjects is null
+# - Output table schema: therapeutic_area (STRING), total_studies (BIGINT), completed_studies (BIGINT), ongoing_studies (BIGINT), avg_enrolled_subjects (DOUBLE)
+# */
 
-/* -------------------- Setup and Imports -------------------- */
+# from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
 
-# spark.catalog.setCurrentCatalog("purgo_databricks")  # Catalog is already set in Databricks
+from pyspark.sql.functions import col, countDistinct, sum as _sum, avg  
 
-# from pyspark.sql import SparkSession  # SparkSession is available in Databricks
-from pyspark.sql.functions import col, when, count, avg, round  # Built-in
-from pyspark.sql import DataFrame  # Built-in
+# Set current catalog to Unity Catalog 'purgo_databricks'
+spark.catalog.setCurrentCatalog("purgo_databricks")
 
-/* -------------------- Read Source Table -------------------- */
+# Read source table from Unity Catalog
+try:
+    src_df = spark.table("purgo_playground.study_therapeutic_analysis")
+except Exception as e:
+    raise RuntimeError("Source table purgo_playground.study_therapeutic_analysis not found") from e
 
-# Read source table
-src_df = spark.table("purgo_playground.study_therapeutic_analysis")
+# Filter out rows with null therapeutic_area or study_title
+filtered_df = src_df.filter(
+    col("therapeutic_area").isNotNull() & col("study_title").isNotNull()
+)
 
-/* -------------------- Aggregation Logic -------------------- */
-
+# CTE: Aggregation logic per requirements
 agg_df = (
-    src_df
-    .filter(col("therapeutic_area").isNotNull())  # Exclude NULL therapeutic_area
-    .groupBy("therapeutic_area")
+    filtered_df.groupBy("therapeutic_area")
     .agg(
-        count("study_roll_number").alias("total_studies"),  # Count all studies per therapeutic_area
-        count(when(col("study_conduct_status") == "Completed", 1)).alias("completed_studies"),  # Completed studies
-        count(when(col("study_conduct_status") == "Ongoing", 1)).alias("ongoing_studies"),  # Ongoing studies
-        round(avg(when(col("enrolled_subjects_qty").isNotNull(), col("enrolled_subjects_qty"))), 2).alias("avg_enrolled_subjects")  # Average enrolled_subjects_qty, excluding NULLs
+        countDistinct("study_title").alias("total_studies"),  # Unique study_title per therapeutic_area
+        _sum((col("study_conduct_status") == "Completed").cast("int")).cast("bigint").alias("completed_studies"),  # Count where status is Completed
+        _sum((col("study_conduct_status") == "Ongoing").cast("int")).cast("bigint").alias("ongoing_studies"),      # Count where status is Ongoing
+        avg(col("enrolled_subjects_qty")).alias("avg_enrolled_subjects")  # Average enrolled_subjects_qty, excluding nulls
     )
 )
 
-/* -------------------- Display Results -------------------- */
-
+# Display results for validation
 agg_df.show()
 
-/* -------------------- Delta Lake Write and Error Handling -------------------- */
-
+# Write results to output table in Unity Catalog
 try:
-    agg_df.write.format("delta").mode("overwrite").saveAsTable("purgo_playground.study_therapeutic_analysis_results")
+    agg_df.write.format("delta").mode("overwrite").option("overwriteSchema", True).saveAsTable("purgo_playground.study_therapeutic_analysis_results")
 except Exception as e:
-    print("Error: Output table purgo_playground.study_therapeutic_analysis_results does not exist")
-    print(str(e))
+    raise RuntimeError("Output table purgo_playground.study_therapeutic_analysis_results not found or cannot be written") from e
 
-/* -------------------- Validation Query using CTE -------------------- */
-
-def validate_therapeutic_analysis(df: DataFrame) -> DataFrame:
-    # CTE for validation
-    cte_df = df.select(
-        col("therapeutic_area"),
-        col("total_studies"),
-        col("completed_studies"),
-        col("ongoing_studies"),
-        col("avg_enrolled_subjects")
-    )
-    # Validation: total_studies >= completed_studies + ongoing_studies
-    return cte_df.filter(col("total_studies") >= (col("completed_studies") + col("ongoing_studies")))
-
-# Run validation
-validated_df = validate_therapeutic_analysis(agg_df)
-validated_df.show()
-
-# spark.stop()  # Do not stop Spark in Databricks
+# spark.stop()  # Do not stop SparkSession in Databricks
