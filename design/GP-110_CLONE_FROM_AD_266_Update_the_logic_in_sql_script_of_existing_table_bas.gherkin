@@ -1,0 +1,184 @@
+Feature: Enhanced SQL Transformation for pat_account Table
+
+  The SQL logic for the pat_account table must be updated to align with the latest source-to-target mapping specifications. This includes transformation rules for prescriber_id, prescriber_key, patient_sf_id, hash_key, and the addition of last_modified_date. All transformation logic must be strictly applied as per the mapping specification to ensure data quality, consistency, and reporting accuracy.
+
+  Background:
+    Given the source table purgo_playground.p_account contains patient records
+    And the mapping specification is defined in source_target_mapping_specifications.xlsx
+    And the target table purgo_playground.pat_account has the following columns:
+      | patient_foundation_shipment | prescriber_id | prescriber_key | patient_sf_id | service_request_type | case_sf_id | account_id | hash_key | last_modified_date |
+    And only records where patinet_c contains 'PAT' are eligible for transformation
+
+  # Happy Path Scenarios
+
+  Scenario Outline: Transform and insert valid patient records into pat_account
+    Given a source record with
+      | patient_foundation_shipment | prescriber_name_c | prescriber_name_c_address | patinet_c | recordtypeid | id | accountid |
+      | <patient_foundation_shipment> | <prescriber_name_c> | <prescriber_name_c_address> | <patinet_c> | <recordtypeid> | <id> | <accountid> |
+    And patinet_c contains 'PAT'
+    When the SQL transformation logic is executed
+    Then the target record in pat_account should have
+      | patient_foundation_shipment | prescriber_id | prescriber_key | patient_sf_id | service_request_type | case_sf_id | account_id | hash_key | last_modified_date |
+      | <patient_foundation_shipment> | <expected_prescriber_id> | <expected_prescriber_key> | <expected_patient_sf_id> | <recordtypeid> | <id> | <accountid> | <expected_hash_key> | <expected_last_modified_date> |
+
+    Examples:
+      | patient_foundation_shipment | prescriber_name_c | prescriber_name_c_address | patinet_c   | recordtypeid | id         | accountid   | expected_prescriber_id | expected_prescriber_key | expected_patient_sf_id | expected_hash_key                | expected_last_modified_date |
+      | SHIP123                    | John Smith        | 123 Main St               | PAT001      | SRVTYPE1     | CASE001    | ACC001      | DR.JOHN SMITH          | DR.123 MAIN ST          | PAT001                | PAT001_SRVTYPE1_CASE001          | current_timestamp          |
+      | SHIP456                    | Dr. Alice Jones   | Dr. 456 Elm St            | PAT002      | SRVTYPE2     | CASE002    | ACC002      | DR.ALICE JONES         | DR.456 ELM ST           | PAT002                | PAT002_SRVTYPE2_CASE002          | current_timestamp          |
+      | SHIP789                    | Bob Lee           | 789 Oak Ave               | PAT003      | SRVTYPE3     | CASE003    | ACC003      | DR.BOB LEE             | DR.789 OAK AVE          | PAT003                | PAT003_SRVTYPE3_CASE003          | current_timestamp          |
+
+  Scenario Outline: Transform prescriber_id to uppercase and prefix 'DR.' only if not present
+    Given a source record with prescriber_name_c = <prescriber_name_c>
+    When the SQL transformation logic is executed for prescriber_id
+    Then prescriber_id should be <expected_prescriber_id>
+
+    Examples:
+      | prescriber_name_c   | expected_prescriber_id |
+      | John Smith          | DR.JOHN SMITH          |
+      | Dr. Alice Jones     | DR.ALICE JONES         |
+      | dr. Bob Lee         | DR.BOB LEE             |
+      | DR. Carol White     | DR.CAROL WHITE         |
+
+  Scenario Outline: Transform prescriber_key to uppercase and prefix 'DR.' only if not present
+    Given a source record with prescriber_name_c_address = <prescriber_name_c_address>
+    When the SQL transformation logic is executed for prescriber_key
+    Then prescriber_key should be <expected_prescriber_key>
+
+    Examples:
+      | prescriber_name_c_address | expected_prescriber_key |
+      | 123 Main St               | DR.123 MAIN ST          |
+      | Dr. 456 Elm St            | DR.456 ELM ST           |
+      | dr. 789 Oak Ave           | DR.789 OAK AVE          |
+      | DR. 101 Pine Rd           | DR.101 PINE RD          |
+
+  Scenario Outline: Set patient_sf_id only if patinet_c contains 'PAT'
+    Given a source record with patinet_c = <patinet_c>
+    When the SQL transformation logic is executed for patient_sf_id
+    Then patient_sf_id should be <expected_patient_sf_id>
+
+    Examples:
+      | patinet_c   | expected_patient_sf_id |
+      | PAT001      | PAT001                 |
+      | PAT002      | PAT002                 |
+      | XYZ003      | NULL                   |
+      | 004PAT      | 004PAT                 |
+      | 005         | NULL                   |
+
+  Scenario Outline: Generate hash_key as concatenation of patinet_c, recordtypeid, id with underscores
+    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
+    When the SQL transformation logic is executed for hash_key
+    Then hash_key should be <expected_hash_key>
+
+    Examples:
+      | patinet_c   | recordtypeid | id       | expected_hash_key           |
+      | PAT001      | SRVTYPE1     | CASE001  | PAT001_SRVTYPE1_CASE001    |
+      | PAT002      | SRVTYPE2     | CASE002  | PAT002_SRVTYPE2_CASE002    |
+      | 004PAT      | SRVTYPE3     | CASE003  | 004PAT_SRVTYPE3_CASE003    |
+
+  Scenario: Set last_modified_date to current timestamp for all transformed records
+    Given a source record eligible for transformation
+    When the SQL transformation logic is executed
+    Then last_modified_date should be set to the current timestamp
+
+  # Error Scenarios
+
+  Scenario Outline: Do not transform or insert records where patinet_c does not contain 'PAT'
+    Given a source record with patinet_c = <patinet_c>
+    When the SQL transformation logic is executed
+    Then no record should be inserted into pat_account
+    And an error should be logged in pat_account_error_log with
+      | hash_key | error_col      | error_message                                 | event_time         |
+      | <expected_hash_key> | patient_sf_id | "patinet_c does not contain 'PAT'"           | current_timestamp  |
+
+    Examples:
+      | patinet_c   | recordtypeid | id       | accountid | expected_hash_key           |
+      | XYZ003      | SRVTYPE1     | CASE001  | ACC001    | XYZ003_SRVTYPE1_CASE001     |
+      | 005         | SRVTYPE2     | CASE002  | ACC002    | 005_SRVTYPE2_CASE002        |
+
+  Scenario Outline: Log error if prescriber_name_c or prescriber_name_c_address is NULL
+    Given a source record with prescriber_name_c = <prescriber_name_c> and prescriber_name_c_address = <prescriber_name_c_address>
+    When the SQL transformation logic is executed
+    Then an error should be logged in pat_account_error_log with
+      | hash_key | error_col           | error_message                                 | event_time         |
+      | <expected_hash_key> | <error_col> | <error_message>                              | current_timestamp  |
+
+    Examples:
+      | prescriber_name_c | prescriber_name_c_address | patinet_c | recordtypeid | id       | accountid | expected_hash_key           | error_col         | error_message                      |
+      | NULL              | 123 Main St               | PAT001    | SRVTYPE1     | CASE001  | ACC001    | PAT001_SRVTYPE1_CASE001     | prescriber_id     | "prescriber_name_c is NULL"        |
+      | John Smith        | NULL                      | PAT002    | SRVTYPE2     | CASE002  | ACC002    | PAT002_SRVTYPE2_CASE002     | prescriber_key    | "prescriber_name_c_address is NULL"|
+
+  Scenario Outline: Log error if any required field for hash_key is NULL
+    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
+    When the SQL transformation logic is executed for hash_key
+    Then an error should be logged in pat_account_error_log with
+      | hash_key | error_col      | error_message                                 | event_time         |
+      | <expected_hash_key> | hash_key        | <error_message>                              | current_timestamp  |
+
+    Examples:
+      | patinet_c   | recordtypeid | id       | expected_hash_key           | error_message                      |
+      | NULL        | SRVTYPE1     | CASE001  | _SRVTYPE1_CASE001           | "patinet_c is NULL for hash_key"   |
+      | PAT002      | NULL         | CASE002  | PAT002__CASE002             | "recordtypeid is NULL for hash_key"|
+      | PAT003      | SRVTYPE3     | NULL     | PAT003_SRVTYPE3_            | "id is NULL for hash_key"          |
+
+  # Validation Rules
+
+  Scenario Outline: Validate prescriber_id and prescriber_key transformation rules
+    Given a source record with prescriber_name_c = <prescriber_name_c> and prescriber_name_c_address = <prescriber_name_c_address>
+    When the SQL transformation logic is executed
+    Then prescriber_id must be uppercase and prefixed with 'DR.'
+    And prescriber_key must be uppercase and prefixed with 'DR.'
+
+    Examples:
+      | prescriber_name_c   | prescriber_name_c_address | expected_prescriber_id | expected_prescriber_key |
+      | John Smith          | 123 Main St               | DR.JOHN SMITH          | DR.123 MAIN ST          |
+      | dr. Bob Lee         | dr. 789 Oak Ave           | DR.BOB LEE             | DR.789 OAK AVE          |
+
+  Scenario Outline: Validate hash_key format
+    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
+    When the SQL transformation logic is executed for hash_key
+    Then hash_key must be in the format "<patinet_c>_<recordtypeid>_<id>"
+
+    Examples:
+      | patinet_c   | recordtypeid | id       | expected_hash_key           |
+      | PAT001      | SRVTYPE1     | CASE001  | PAT001_SRVTYPE1_CASE001    |
+      | 004PAT      | SRVTYPE3     | CASE003  | 004PAT_SRVTYPE3_CASE003    |
+
+  Scenario: Validate last_modified_date is always set to current timestamp
+    Given a transformed record in pat_account
+    When last_modified_date is checked
+    Then last_modified_date must be equal to the current timestamp
+
+  # Backward Compatibility
+
+  Scenario: Ensure update applies only to new/updated records
+    Given existing records in pat_account prior to the update
+    When the SQL transformation logic is executed
+    Then only new or updated records should have the new transformation logic applied
+    And existing records remain unchanged
+
+  # Data Quality and Audit
+
+  Scenario Outline: Log ETL event for each successful transformation
+    Given a successful transformation for a record
+    When the record is inserted into pat_account
+    Then an ETL log entry should be created in pat_account_etl_log with
+      | log_ts | patient_sf_id | prescriber_id | hash_key | last_modified_date | account_id | error_message |
+      | current_timestamp | <patient_sf_id> | <prescriber_id> | <hash_key> | current_timestamp | <account_id> | NULL |
+
+    Examples:
+      | patient_sf_id | prescriber_id | hash_key                | account_id |
+      | PAT001        | DR.JOHN SMITH | PAT001_SRVTYPE1_CASE001 | ACC001     |
+      | PAT002        | DR.ALICE JONES| PAT002_SRVTYPE2_CASE002 | ACC002     |
+
+  Scenario Outline: Log ETL event for each error
+    Given an error occurs during transformation
+    When the error is detected
+    Then an ETL log entry should be created in pat_account_etl_log with
+      | log_ts | patient_sf_id | prescriber_id | hash_key | last_modified_date | account_id | error_message |
+      | current_timestamp | <patient_sf_id> | <prescriber_id> | <hash_key> | current_timestamp | <account_id> | <error_message> |
+
+    Examples:
+      | patient_sf_id | prescriber_id | hash_key                | account_id | error_message                      |
+      | NULL          | DR.JOHN SMITH | _SRVTYPE1_CASE001       | ACC001     | "patinet_c is NULL for hash_key"   |
+      | PAT002        | NULL          | PAT002__CASE002         | ACC002     | "prescriber_name_c is NULL"        |
+
