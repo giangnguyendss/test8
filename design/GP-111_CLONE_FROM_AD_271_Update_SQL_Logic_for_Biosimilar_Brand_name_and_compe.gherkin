@@ -1,0 +1,128 @@
+Feature: Update bai_sales.sql to incorporate competitor_flag logic and brand_normalized_name change
+
+  The bai_sales.sql query must be updated to:
+  - Include competitor_flag as a string in the SELECT clause.
+  - Apply conditional logic for competitor_flag: If competitor_flag is TRUE, set integrated_units, integrated_normalized_units, and integrated_dollars to 0.
+  - Change all logic referencing brand_normalized_name = 'xyz' to 'riabni'.
+  - Ensure output fields: brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag (as string), integrated_units, integrated_normalized_units, integrated_dollars.
+  - Use Unity Catalog schema: purgo_databricks.purgo_playground.
+  - Validate correct suppression and reporting of biosimilar sales.
+
+  Background:
+    Given the source table is purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And the following columns exist: brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars, cdl_effective_date
+    And the query must group by brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag
+
+  Scenario: Happy path - competitor_flag is FALSE and brand_normalized_name is not suppressed
+    Given a record with competitor_flag = FALSE
+    And brand_normalized_name is not in ('kanjinti', 'mvasi', 'riabni')
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are summed as per source values
+    And competitor_flag is cast to string and included in the output
+
+  Scenario: Suppression by brand_normalized_name
+    Given a record with brand_normalized_name in ('kanjinti', 'mvasi', 'riabni')
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
+    And competitor_flag is cast to string and included in the output
+
+  Scenario: Suppression by competitor_flag
+    Given a record with competitor_flag = TRUE
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
+    And competitor_flag is cast to string and included in the output
+
+  Scenario Outline: Data-driven test for suppression logic
+    Given a record with brand_normalized_name = <brand_name>
+    And competitor_flag = <comp_flag>
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are <expected_units>
+    And competitor_flag is cast to string and included in the output
+
+    Examples:
+      | brand_name | comp_flag | expected_units |
+      | kanjinti   | FALSE     | 0              |
+      | mvasi      | FALSE     | 0              |
+      | riabni     | FALSE     | 0              |
+      | abc        | TRUE      | 0              |
+      | abc        | FALSE     | source value   |
+      | riabni     | TRUE      | 0              |
+
+  Scenario: Error scenario - invalid cdl_effective_date
+    Given a record with cdl_effective_date is NULL or not a valid date
+    When the query is executed
+    Then the record is excluded from the output
+    And an error is logged in purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_invalid_cdl_effective_date_log with error_message "Invalid cdl_effective_date"
+
+  Scenario: Schema and environment validation
+    Given the query references agilisium_playground.purgo_playground
+    When the query is migrated
+    Then the schema is updated to purgo_databricks.purgo_playground
+
+  Scenario: Output field validation
+    Given the query is executed
+    When the output is generated
+    Then the output includes fields: brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag (as string), integrated_units, integrated_normalized_units, integrated_dollars
+
+  Scenario: Downstream process impact
+    Given the output structure is changed
+    When downstream reports or ETL processes consume the output
+    Then those processes must be updated to handle competitor_flag as string and new suppression logic
+
+  Scenario Outline: Validation of competitor_flag casting
+    Given a record with competitor_flag = <input_flag>
+    When the query is executed
+    Then competitor_flag in the output is "<output_flag>"
+
+    Examples:
+      | input_flag | output_flag |
+      | TRUE       | "true"      |
+      | FALSE      | "false"     |
+      | NULL       | "null"      |
+
+  Scenario: SQL logic output
+    Given the requirements above
+    When the SQL query is generated
+    Then the output SQL logic is:
+      """
+      select
+        brand_normalized_name,
+        normalized_name,
+        market_normalized_name,
+        channel_name,
+        transaction_timestamp,
+        cast(competitor_flag as string) as competitor_flag,
+        sum(
+          case
+            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') or competitor_flag = true
+              then 0
+            else integrated_units
+          end
+        ) as integrated_units,
+        sum(
+          case
+            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') or competitor_flag = true
+              then 0
+            else integrated_normalized_units
+          end
+        ) as integrated_normalized_units,
+        sum(
+          case
+            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') or competitor_flag = true
+              then 0
+            else integrated_dollars
+          end
+        ) as integrated_dollars
+      from
+        purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+      where
+        substring(transaction_timestamp,1,10) >= add_months(cdl_effective_date, -36)
+        and lower(market_normalized_name) in ('trastuzumab-anns','bevacizumab-awwb','rituximab market')
+      group by
+        brand_normalized_name,
+        normalized_name,
+        market_normalized_name,
+        channel_name,
+        transaction_timestamp,
+        competitor_flag
+      """
