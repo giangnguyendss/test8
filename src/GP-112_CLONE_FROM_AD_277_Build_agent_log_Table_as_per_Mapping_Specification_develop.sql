@@ -1,47 +1,63 @@
 USE CATALOG purgo_databricks;
 
-/* 
-===============================================================================
-Databricks SQL Implementation: Agent Log Calculated Field Query
-===============================================================================
+/*==============================================================================
+Agent Log Calculated Field Query
+==============================================================================
 Unity Catalog: purgo_databricks
 Schema: purgo_playground
-Target Table: agent_log (for display only, not insert/update)
-Error Logging Table: agent_log_error_log
 
-Business Logic:
 - Joins session_tracking_data, user_presence_tracker, agent_profile_data
+- Handles hardcoded city/state/country/zip_code
+- Surrogate key agent_key: SHA256(concat(all output fields))
+- Error logging to agent_log_error_log for missing/null data
+- Window functions for first_login/first_logout per agent per day
 - Most recent agent_name/unix_id per email_address (by last_modified_timestamp)
-- Multiple sessions per agent per day: first_login = min(session_start_time), first_logout = max(session_end_time)
-- total_login_time_hrs = (first_logout - first_login) in hours, formatted as string with 2 decimals
-- Hardcoded city/state/country/zip
-- agent_key = SHA256(concat(all output fields))
-- Error logging for missing/nulls as per specification
-
-===============================================================================
-*/
+- Filters: log_date range, agent selection (optional via WHERE)
+- Output: Display only, no insert/update
+==============================================================================*/
 
 /*-----------------------------------------------------------------------------
-SECTION: Output Column Documentation
+SECTION: UDF for Surrogate Key Generation
 -----------------------------------------------------------------------------*/
-COMMENT ON COLUMN purgo_playground.agent_log.unix_id IS 'Agent internal user key, derived from agent_profile_data.internal_user_key. Not null if agent exists.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_name IS 'Agent full name, most recent from agent_profile_data.full_name by last_modified_timestamp. Not null if agent exists.';
-COMMENT ON COLUMN purgo_playground.agent_log.log_date IS 'Date of agent session (YYYY-MM-DD), derived from session_start_time.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_first_login IS 'Earliest session_start_time for agent on log_date.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_first_logout IS 'Latest session_end_time for agent on log_date.';
-COMMENT ON COLUMN purgo_playground.agent_log.total_login_time_hrs IS 'Difference between agent_first_logout and agent_first_login in hours, formatted as string with 2 decimals.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_lunch_login IS 'Lunch login timestamp, if available. Nullable.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_lunch_logout IS 'Lunch logout timestamp, if available. Nullable.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_lunch_duration IS 'Lunch duration in hours, formatted as string. Nullable.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_city IS 'Hardcoded value: "New York".';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_state IS 'Hardcoded value: "NY".';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_country IS 'Hardcoded value: "USA".';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_zip_code IS 'Hardcoded value: "10001".';
-COMMENT ON COLUMN purgo_playground.agent_log.data_loaded_at IS 'Timestamp when data was loaded. CURRENT_TIMESTAMP.';
-COMMENT ON COLUMN purgo_playground.agent_log.agent_key IS 'SHA256 hash of all output fields concatenated. 64-character hexadecimal string.';
+CREATE OR REPLACE FUNCTION purgo_playground.agent_log_surrogate_key(
+  unix_id STRING,
+  agent_name STRING,
+  log_date DATE,
+  agent_first_login TIMESTAMP,
+  agent_first_logout TIMESTAMP,
+  total_login_time_hrs STRING,
+  agent_lunch_login TIMESTAMP,
+  agent_lunch_logout TIMESTAMP,
+  agent_lunch_duration STRING,
+  agent_city STRING,
+  agent_state STRING,
+  agent_country STRING,
+  agent_zip_code STRING,
+  data_loaded_at TIMESTAMP
+)
+RETURNS STRING
+RETURN SHA2(
+  CONCAT(
+    COALESCE(unix_id,""),
+    COALESCE(agent_name,""),
+    COALESCE(CAST(log_date AS STRING),""),
+    COALESCE(CAST(agent_first_login AS STRING),""),
+    COALESCE(CAST(agent_first_logout AS STRING),""),
+    COALESCE(total_login_time_hrs,""),
+    COALESCE(CAST(agent_lunch_login AS STRING),""),
+    COALESCE(CAST(agent_lunch_logout AS STRING),""),
+    COALESCE(agent_lunch_duration,""),
+    COALESCE(agent_city,""),
+    COALESCE(agent_state,""),
+    COALESCE(agent_country,""),
+    COALESCE(agent_zip_code,""),
+    COALESCE(CAST(data_loaded_at AS STRING),"")
+  ),
+  256
+);
 
 /*-----------------------------------------------------------------------------
-SECTION: Calculated Field Query (CTE-based, display only)
+SECTION: Main CTE - Agent Log Calculated Field
 -----------------------------------------------------------------------------*/
 WITH
 -- CTE: Most recent agent profile per email_address
@@ -57,13 +73,58 @@ latest_agent_profile AS (
     ) AS rn
   FROM purgo_playground.agent_profile_data ap
 ),
--- CTE: Join session_tracking_data with user_presence_tracker and latest_agent_profile
-session_agent_data AS (
+-- CTE: Join session_tracking_data with user_presence_tracker and agent_profile_data
+agent_log_base AS (
   SELECT
+    -- unix_id: internal_user_key from agent_profile_data
+    lap.internal_user_key AS unix_id,
+    -- agent_name: full_name from agent_profile_data
+    lap.full_name AS agent_name,
+    -- log_date: date part of session_start_time
+    DATE(std.session_start_time) AS log_date,
+    -- agent_first_login: min(session_start_time) per agent per log_date
+    MIN(std.session_start_time) OVER (
+      PARTITION BY lap.internal_user_key, DATE(std.session_start_time)
+    ) AS agent_first_login,
+    -- agent_first_logout: max(session_end_time) per agent per log_date
+    MAX(std.session_end_time) OVER (
+      PARTITION BY lap.internal_user_key, DATE(std.session_start_time)
+    ) AS agent_first_logout,
+    -- total_login_time_hrs: (agent_first_logout - agent_first_login) in hours, 2 decimal places
+    LPAD(
+      CAST(
+        ROUND(
+          (
+            UNIX_TIMESTAMP(
+              MAX(std.session_end_time) OVER (
+                PARTITION BY lap.internal_user_key, DATE(std.session_start_time)
+              )
+            ) -
+            UNIX_TIMESTAMP(
+              MIN(std.session_start_time) OVER (
+                PARTITION BY lap.internal_user_key, DATE(std.session_start_time)
+              )
+            )
+          ) / 3600.0
+        ,2) AS STRING
+      ),
+      4, "0"
+    ) AS total_login_time_hrs,
+    -- agent_lunch_login, agent_lunch_logout, agent_lunch_duration: NULL (not mapped)
+    CAST(NULL AS TIMESTAMP) AS agent_lunch_login,
+    CAST(NULL AS TIMESTAMP) AS agent_lunch_logout,
+    CAST(NULL AS STRING) AS agent_lunch_duration,
+    -- Hardcoded fields
+    "New York" AS agent_city,
+    "NY" AS agent_state,
+    "USA" AS agent_country,
+    "10001" AS agent_zip_code,
+    -- data_loaded_at: current timestamp
+    CURRENT_TIMESTAMP() AS data_loaded_at,
+    -- For error logging
     std.person_identifier,
     upt.email_address,
-    lap.internal_user_key AS unix_id,
-    lap.full_name AS agent_name,
+    lap.last_modified_timestamp,
     std.session_start_time,
     std.session_end_time
   FROM purgo_playground.session_tracking_data std
@@ -71,82 +132,8 @@ session_agent_data AS (
     ON std.person_identifier = upt.person_identifier
   LEFT JOIN latest_agent_profile lap
     ON upt.email_address = lap.email_address AND lap.rn = 1
-),
--- CTE: Aggregate sessions per agent per day
-agent_daily_sessions AS (
-  SELECT
-    sad.unix_id,
-    sad.agent_name,
-    DATE(sad.session_start_time) AS log_date,
-    MIN(sad.session_start_time) AS agent_first_login,
-    MAX(sad.session_end_time) AS agent_first_logout,
-    -- Lunch fields: Not available in source, set as NULL
-    CAST(NULL AS TIMESTAMP) AS agent_lunch_login,
-    CAST(NULL AS TIMESTAMP) AS agent_lunch_logout,
-    CAST(NULL AS STRING) AS agent_lunch_duration,
-    'New York' AS agent_city,
-    'NY' AS agent_state,
-    'USA' AS agent_country,
-    '10001' AS agent_zip_code,
-    CURRENT_TIMESTAMP() AS data_loaded_at
-  FROM session_agent_data sad
-  WHERE sad.person_identifier IS NOT NULL
-    AND sad.session_start_time IS NOT NULL
-    AND sad.session_end_time IS NOT NULL
-    AND sad.unix_id IS NOT NULL
-    AND sad.agent_name IS NOT NULL
-  GROUP BY
-    sad.unix_id,
-    sad.agent_name,
-    DATE(sad.session_start_time)
-),
--- CTE: Calculate total_login_time_hrs and agent_key
-agent_log_calculated AS (
-  SELECT
-    unix_id,
-    agent_name,
-    log_date,
-    agent_first_login,
-    agent_first_logout,
-    -- Calculate total_login_time_hrs: difference in hours, formatted as string with 2 decimals
-    LPAD(
-      CAST(
-        ROUND(
-          (UNIX_TIMESTAMP(agent_first_logout) - UNIX_TIMESTAMP(agent_first_login)) / 3600.0
-        ,2) AS STRING
-      )
-    ,4,'0') AS total_login_time_hrs,
-    agent_lunch_login,
-    agent_lunch_logout,
-    agent_lunch_duration,
-    agent_city,
-    agent_state,
-    agent_country,
-    agent_zip_code,
-    data_loaded_at,
-    -- agent_key: SHA256 of all output fields concatenated as string
-    SHA2(
-      CONCAT(
-        COALESCE(unix_id,''),
-        COALESCE(agent_name,''),
-        COALESCE(CAST(log_date AS STRING),''),
-        COALESCE(CAST(agent_first_login AS STRING),''),
-        COALESCE(CAST(agent_first_logout AS STRING),''),
-        COALESCE(total_login_time_hrs,''),
-        COALESCE(CAST(agent_lunch_login AS STRING),''),
-        COALESCE(CAST(agent_lunch_logout AS STRING),''),
-        COALESCE(agent_lunch_duration,''),
-        COALESCE(agent_city,''),
-        COALESCE(agent_state,''),
-        COALESCE(agent_country,''),
-        COALESCE(agent_zip_code,''),
-        COALESCE(CAST(data_loaded_at AS STRING),'')
-      ),256
-    ) AS agent_key
-  FROM agent_daily_sessions
 )
-
--- Final SELECT: Display calculated fields for agent_log
+-- Final SELECT: Only valid records, calculated agent_key
 SELECT
   unix_id,
   agent_name,
@@ -162,66 +149,105 @@ SELECT
   agent_country,
   agent_zip_code,
   data_loaded_at,
-  agent_key
-FROM agent_log_calculated
--- Example filters: Uncomment as needed
--- WHERE log_date >= DATE('2025-01-02') AND log_date <= DATE('2025-01-06')
---   AND unix_id = 'IU011'
+  purgo_playground.agent_log_surrogate_key(
+    unix_id,
+    agent_name,
+    log_date,
+    agent_first_login,
+    agent_first_logout,
+    total_login_time_hrs,
+    agent_lunch_login,
+    agent_lunch_logout,
+    agent_lunch_duration,
+    agent_city,
+    agent_state,
+    agent_country,
+    agent_zip_code,
+    data_loaded_at
+  ) AS agent_key
+FROM agent_log_base
+WHERE
+  unix_id IS NOT NULL
+  AND agent_name IS NOT NULL
+  AND log_date IS NOT NULL
+  AND agent_first_login IS NOT NULL
+  AND agent_first_logout IS NOT NULL
+  AND total_login_time_hrs IS NOT NULL
+  -- Optional filters: uncomment as needed
+  -- AND log_date >= DATE('2025-01-02') AND log_date <= DATE('2025-01-06')
+  -- AND unix_id = "IU011"
 ;
 
 /*-----------------------------------------------------------------------------
-SECTION: Error Logging for Missing/NULL Data
+SECTION: Error Logging - Insert error records for missing/null data
 -----------------------------------------------------------------------------*/
--- Log error: Missing person_identifier in session_tracking_data
+-- Error: Missing person_identifier
 INSERT INTO purgo_playground.agent_log_error_log
 SELECT
-  'Missing person_identifier' AS error_type,
-  'person_identifier is NULL in session_tracking_data' AS error_message,
+  "Missing person_identifier" AS error_type,
+  "person_identifier is NULL in session_tracking_data" AS error_message,
   CURRENT_TIMESTAMP() AS error_time
-FROM purgo_playground.session_tracking_data
-WHERE person_identifier IS NULL
-;
+FROM agent_log_base
+WHERE person_identifier IS NULL;
 
--- Log error: Missing email_address in user_presence_tracker
+-- Error: Missing email_address
 INSERT INTO purgo_playground.agent_log_error_log
 SELECT
-  'Missing email_address' AS error_type,
-  CONCAT('No email_address found for person_identifier ', std.person_identifier) AS error_message,
+  "Missing email_address" AS error_type,
+  CONCAT("No email_address found for person_identifier ", person_identifier) AS error_message,
   CURRENT_TIMESTAMP() AS error_time
-FROM purgo_playground.session_tracking_data std
-LEFT JOIN purgo_playground.user_presence_tracker upt
-  ON std.person_identifier = upt.person_identifier
-WHERE std.person_identifier IS NOT NULL
-  AND upt.email_address IS NULL
-;
+FROM agent_log_base
+WHERE email_address IS NULL AND person_identifier IS NOT NULL;
 
--- Log error: Missing agent_profile_data for email_address
+-- Error: Missing agent_profile_data
 INSERT INTO purgo_playground.agent_log_error_log
 SELECT
-  'Missing agent_profile_data' AS error_type,
-  CONCAT('No agent_profile_data found for email_address ', upt.email_address) AS error_message,
+  "Missing agent_profile_data" AS error_type,
+  CONCAT("No agent_profile_data found for email_address ", email_address) AS error_message,
   CURRENT_TIMESTAMP() AS error_time
-FROM purgo_playground.session_tracking_data std
-LEFT JOIN purgo_playground.user_presence_tracker upt
-  ON std.person_identifier = upt.person_identifier
-LEFT JOIN purgo_playground.agent_profile_data ap
-  ON upt.email_address = ap.email_address
-WHERE std.person_identifier IS NOT NULL
-  AND upt.email_address IS NOT NULL
-  AND ap.email_address IS NULL
-;
+FROM agent_log_base
+WHERE unix_id IS NULL AND email_address IS NOT NULL;
 
--- Log error: NULL session_start_time or session_end_time
+-- Error: NULL session_start_time or session_end_time
 INSERT INTO purgo_playground.agent_log_error_log
 SELECT
-  'Missing session times' AS error_type,
-  CONCAT('session_start_time or session_end_time is NULL for person_identifier ', std.person_identifier) AS error_message,
+  "Missing session times" AS error_type,
+  CONCAT("session_start_time or session_end_time is NULL for person_identifier ", person_identifier) AS error_message,
   CURRENT_TIMESTAMP() AS error_time
-FROM purgo_playground.session_tracking_data std
-WHERE std.person_identifier IS NOT NULL
-  AND (std.session_start_time IS NULL OR std.session_end_time IS NULL)
+FROM agent_log_base
+WHERE (session_start_time IS NULL OR session_end_time IS NULL) AND person_identifier IS NOT NULL;
+
+-- Error: Data type mismatch (agent_name NULL)
+INSERT INTO purgo_playground.agent_log_error_log
+SELECT
+  "Data type mismatch" AS error_type,
+  CONCAT("Field agent_name is NULL for unix_id ", unix_id) AS error_message,
+  CURRENT_TIMESTAMP() AS error_time
+FROM agent_log_base
+WHERE agent_name IS NULL AND unix_id IS NOT NULL;
+
+-- Error: Hashing error (agent_key could not be generated)
+INSERT INTO purgo_playground.agent_log_error_log
+SELECT
+  "Hashing error" AS error_type,
+  "agent_key could not be generated due to null fields" AS error_message,
+  CURRENT_TIMESTAMP() AS error_time
+FROM agent_log_base
+WHERE unix_id IS NOT NULL AND (
+  agent_name IS NULL OR log_date IS NULL OR agent_first_login IS NULL OR agent_first_logout IS NULL OR total_login_time_hrs IS NULL
+);
+
+-- Error: All fields NULL
+INSERT INTO purgo_playground.agent_log_error_log
+SELECT
+  "All fields NULL" AS error_type,
+  "All agent_log fields are NULL in source data" AS error_message,
+  CURRENT_TIMESTAMP() AS error_time
+FROM agent_log_base
+WHERE
+  unix_id IS NULL AND agent_name IS NULL AND log_date IS NULL AND agent_first_login IS NULL AND agent_first_logout IS NULL AND total_login_time_hrs IS NULL
 ;
 
 /*-----------------------------------------------------------------------------
-END OF IMPLEMENTATION
+END OF AGENT LOG CALCULATED FIELD QUERY
 -----------------------------------------------------------------------------*/
