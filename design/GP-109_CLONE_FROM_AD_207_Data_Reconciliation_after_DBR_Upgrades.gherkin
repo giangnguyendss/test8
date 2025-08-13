@@ -1,0 +1,143 @@
+Feature: Validation of Data Consistency Between product_plant and product_plant_v2 Tables
+
+  The Databricks PySpark script compares each column value from product_plant and product_plant_v2 tables using plant_id as the join key. For each column, a validation column is generated indicating "Match" or "Mismatch". The results are stored in the pp_validation_results table, with columns ordered as: source column, target column, validation column for each attribute. The script must handle missing rows, nulls, and data type mismatches, and log errors in the error_message column.
+
+  Background:
+    Given the source table "purgo_playground.product_plant" exists with defined schema
+    And the target table "purgo_playground.product_plant_v2" exists with defined schema
+    And the output table "purgo_playground.pp_validation_results" is dropped and recreated with the required schema
+    And all columns from both tables are aliased as _src and _tgt respectively in the output
+    And plant_id is used as the join/comparison key
+    And all validation columns are of type string and contain either "Match", "Mismatch", or a specific error message
+    And missing rows in either source or target are flagged in missing_from_src or missing_from_tgt columns
+    And any data type conversion errors or null handling issues are logged in error_message column
+
+  Scenario Outline: Validate matching rows between product_plant and product_plant_v2
+    Given a row exists in product_plant with plant_id = <plant_id> and the following values:
+      | plant_cd         | company_cd      | source_system_cd | product_line     | primary_uom_cd | global_uom_conversion_rate | global_uom_cd | lifecycle_status | flais_active | sales_rank_abc | inventory_rank_abc | make_buy |
+      | <plant_cd_src>   | <company_cd_src>| <source_system_cd_src> | <product_line_src> | <primary_uom_cd_src> | <global_uom_conversion_rate_src> | <global_uom_cd_src> | <lifecycle_status_src> | <flais_active_src> | <sales_rank_abc_src> | <inventory_rank_abc_src> | <make_buy_src> |
+    And a row exists in product_plant_v2 with plant_id = <plant_id> and the following values:
+      | plant_cd         | company_cd      | source_system_cd | product_line     | primary_uom_cd | global_uom_conversion_rate | global_uom_cd | lifecycle_status | flais_active | sales_rank_abc | inventory_rank_abc | make_buy |
+      | <plant_cd_tgt>   | <company_cd_tgt>| <source_system_cd_tgt> | <product_line_tgt> | <primary_uom_cd_tgt> | <global_uom_conversion_rate_tgt> | <global_uom_cd_tgt> | <lifecycle_status_tgt> | <flais_active_tgt> | <sales_rank_abc_tgt> | <inventory_rank_abc_tgt> | <make_buy_tgt> |
+    When the script compares each column value between product_plant and product_plant_v2 for plant_id = <plant_id>
+    Then the pp_validation_results table contains a row with:
+      | plant_id_src | plant_id_tgt | plant_id_validation |
+      | <plant_id>   | <plant_id>   | <plant_id_validation> |
+    And for each column, the validation column is set to "Match" if values are equal (including null=null), otherwise "Mismatch"
+    And missing_from_src and missing_from_tgt are null
+    And error_message is null
+
+    Examples:
+      | plant_id | plant_cd_src | plant_cd_tgt | plant_id_validation | company_cd_src | company_cd_tgt | company_cd_validation | source_system_cd_src | source_system_cd_tgt | source_system_cd_validation | product_line_src | product_line_tgt | product_line_validation | primary_uom_cd_src | primary_uom_cd_tgt | primary_uom_cd_validation | global_uom_conversion_rate_src | global_uom_conversion_rate_tgt | global_uom_conversion_rate_validation | global_uom_cd_src | global_uom_cd_tgt | global_uom_cd_validation | lifecycle_status_src | lifecycle_status_tgt | lifecycle_status_validation | flais_active_src | flais_active_tgt | flais_active_validation | sales_rank_abc_src | sales_rank_abc_tgt | sales_rank_abc_validation | inventory_rank_abc_src | inventory_rank_abc_tgt | inventory_rank_abc_validation | make_buy_src | make_buy_tgt | make_buy_validation |
+      | 101      | PLANT_A      | PLANT_A      | Match              | CO1           | CO1           | Match                | SYS1               | SYS1               | Match                      | PRODLINE1        | PRODLINE1        | Match                  | UOM1              | UOM1              | Match                    | 1.0                        | 1.0                        | Match                              | GUOM1           | GUOM1           | Match                  | ACTIVE             | ACTIVE             | Match                  | Y               | Y               | Match                  | A                 | A                 | Match                  | B                   | B                   | Match                      | MAKE         | MAKE         | Match              |
+      | 102      | PLANT_B      | PLANT_C      | Mismatch           | CO2           | CO2           | Match                | SYS2               | SYS2               | Match                      | PRODLINE2        | PRODLINE2        | Match                  | UOM2              | UOM2              | Match                    | 2.5                        | 2.5                        | Match                              | GUOM2           | GUOM2           | Match                  | INACTIVE           | ACTIVE             | Mismatch               | N               | Y               | Mismatch               | B                 | C                 | Mismatch               | C                   | C                   | Match                      | BUY          | MAKE         | Mismatch           |
+
+  Scenario Outline: Handle missing rows in product_plant (source)
+    Given a row exists in product_plant_v2 with plant_id = <plant_id> and the following values:
+      | plant_cd         | company_cd      | source_system_cd | product_line     | primary_uom_cd | global_uom_conversion_rate | global_uom_cd | lifecycle_status | flais_active | sales_rank_abc | inventory_rank_abc | make_buy |
+      | <plant_cd_tgt>   | <company_cd_tgt>| <source_system_cd_tgt> | <product_line_tgt> | <primary_uom_cd_tgt> | <global_uom_conversion_rate_tgt> | <global_uom_cd_tgt> | <lifecycle_status_tgt> | <flais_active_tgt> | <sales_rank_abc_tgt> | <inventory_rank_abc_tgt> | <make_buy_tgt> |
+    And no row exists in product_plant with plant_id = <plant_id>
+    When the script compares rows for plant_id = <plant_id>
+    Then the pp_validation_results table contains a row with:
+      | plant_id_src | plant_id_tgt | plant_id_validation |
+      | null         | <plant_id>   | Mismatch            |
+    And all *_src columns are null
+    And all *_tgt columns are populated from product_plant_v2
+    And all *_validation columns are set to "Mismatch"
+    And missing_from_src is set to "Missing in Source"
+    And missing_from_tgt is null
+    And error_message is null
+
+    Examples:
+      | plant_id | plant_cd_tgt | company_cd_tgt | source_system_cd_tgt | product_line_tgt | primary_uom_cd_tgt | global_uom_conversion_rate_tgt | global_uom_cd_tgt | lifecycle_status_tgt | flais_active_tgt | sales_rank_abc_tgt | inventory_rank_abc_tgt | make_buy_tgt |
+      | 201      | PLANT_X      | COX           | SYSX               | PRODLINEX        | UOMX              | 3.0                        | GUOMX           | ACTIVE             | Y               | X                 | X                   | MAKE         |
+
+  Scenario Outline: Handle missing rows in product_plant_v2 (target)
+    Given a row exists in product_plant with plant_id = <plant_id> and the following values:
+      | plant_cd         | company_cd      | source_system_cd | product_line     | primary_uom_cd | global_uom_conversion_rate | global_uom_cd | lifecycle_status | flais_active | sales_rank_abc | inventory_rank_abc | make_buy |
+      | <plant_cd_src>   | <company_cd_src>| <source_system_cd_src> | <product_line_src> | <primary_uom_cd_src> | <global_uom_conversion_rate_src> | <global_uom_cd_src> | <lifecycle_status_src> | <flais_active_src> | <sales_rank_abc_src> | <inventory_rank_abc_src> | <make_buy_src> |
+    And no row exists in product_plant_v2 with plant_id = <plant_id>
+    When the script compares rows for plant_id = <plant_id>
+    Then the pp_validation_results table contains a row with:
+      | plant_id_src | plant_id_tgt | plant_id_validation |
+      | <plant_id>   | null         | Mismatch            |
+    And all *_src columns are populated from product_plant
+    And all *_tgt columns are null
+    And all *_validation columns are set to "Mismatch"
+    And missing_from_src is null
+    And missing_from_tgt is set to "Missing in Target"
+    And error_message is null
+
+    Examples:
+      | plant_id | plant_cd_src | company_cd_src | source_system_cd_src | product_line_src | primary_uom_cd_src | global_uom_conversion_rate_src | global_uom_cd_src | lifecycle_status_src | flais_active_src | sales_rank_abc_src | inventory_rank_abc_src | make_buy_src |
+      | 202      | PLANT_Y      | COY           | SYSY               | PRODLINEY        | UOMY              | 4.5                        | GUOMY           | INACTIVE           | N               | Y                 | Z                   | BUY          |
+
+  Scenario Outline: Handle null values in columns
+    Given a row exists in product_plant with plant_id = <plant_id> and the following values:
+      | plant_cd         | company_cd      | source_system_cd | product_line     | primary_uom_cd | global_uom_conversion_rate | global_uom_cd | lifecycle_status | flais_active | sales_rank_abc | inventory_rank_abc | make_buy |
+      | <plant_cd_src>   | <company_cd_src>| <source_system_cd_src> | <product_line_src> | <primary_uom_cd_src> | <global_uom_conversion_rate_src> | <global_uom_cd_src> | <lifecycle_status_src> | <flais_active_src> | <sales_rank_abc_src> | <inventory_rank_abc_src> | <make_buy_src> |
+    And a row exists in product_plant_v2 with plant_id = <plant_id> and the following values:
+      | plant_cd         | company_cd      | source_system_cd | product_line     | primary_uom_cd | global_uom_conversion_rate | global_uom_cd | lifecycle_status | flais_active | sales_rank_abc | inventory_rank_abc | make_buy |
+      | <plant_cd_tgt>   | <company_cd_tgt>| <source_system_cd_tgt> | <product_line_tgt> | <primary_uom_cd_tgt> | <global_uom_conversion_rate_tgt> | <global_uom_cd_tgt> | <lifecycle_status_tgt> | <flais_active_tgt> | <sales_rank_abc_tgt> | <inventory_rank_abc_tgt> | <make_buy_tgt> |
+    When the script compares each column value between product_plant and product_plant_v2 for plant_id = <plant_id>
+    Then for each column, if both values are null, the validation column is set to "Match"
+    And if one value is null and the other is not, the validation column is set to "Mismatch"
+    And error_message is null
+
+    Examples:
+      | plant_id | plant_cd_src | plant_cd_tgt | plant_cd_validation | company_cd_src | company_cd_tgt | company_cd_validation |
+      | 301      | null         | null         | Match              | CO3           | null           | Mismatch              |
+      | 302      | PLANT_Z      | null         | Mismatch           | null          | CO4            | Mismatch              |
+
+  Scenario Outline: Handle data type mismatches or conversion errors
+    Given a row exists in product_plant with plant_id = <plant_id> and the following values:
+      | global_uom_conversion_rate |
+      | <global_uom_conversion_rate_src> |
+    And a row exists in product_plant_v2 with plant_id = <plant_id> and the following values:
+      | global_uom_conversion_rate |
+      | <global_uom_conversion_rate_tgt> |
+    When the script attempts to compare global_uom_conversion_rate between product_plant and product_plant_v2 for plant_id = <plant_id>
+    Then if a data type conversion error occurs, the global_uom_conversion_rate_validation column is set to "Error"
+    And error_message contains "Data type mismatch for global_uom_conversion_rate"
+    And other validation columns are processed as per normal rules
+
+    Examples:
+      | plant_id | global_uom_conversion_rate_src | global_uom_conversion_rate_tgt |
+      | 401      | "not_a_number"                | 5.0                           |
+      | 402      | 6.0                           | "NaN"                         |
+
+  Scenario: Logging errors for unexpected exceptions during validation
+    Given an unexpected exception occurs during the validation process for plant_id = 501
+    When the script processes the row
+    Then the error_message column in pp_validation_results contains the exception details
+    And all validation columns for the row are set to "Error"
+    And missing_from_src and missing_from_tgt are null
+
+  Scenario: Column order in pp_validation_results table
+    Given the pp_validation_results table is created
+    Then the columns are ordered as: source column, target column, validation column for each attribute, in the following sequence:
+      | plant_id_src | plant_id_tgt | plant_id_validation |
+      | plant_cd_src | plant_cd_tgt | plant_cd_validation |
+      | company_cd_src | company_cd_tgt | company_cd_validation |
+      | source_system_cd_src | source_system_cd_tgt | source_system_cd_validation |
+      | product_line_src | product_line_tgt | product_line_validation |
+      | primary_uom_cd_src | primary_uom_cd_tgt | primary_uom_cd_validation |
+      | global_uom_conversion_rate_src | global_uom_conversion_rate_tgt | global_uom_conversion_rate_validation |
+      | global_uom_cd_src | global_uom_cd_tgt | global_uom_cd_validation |
+      | lifecycle_status_src | lifecycle_status_tgt | lifecycle_status_validation |
+      | flais_active_src | flais_active_tgt | flais_active_validation |
+      | sales_rank_abc_src | sales_rank_abc_tgt | sales_rank_abc_validation |
+      | inventory_rank_abc_src | inventory_rank_abc_tgt | inventory_rank_abc_validation |
+      | make_buy_src | make_buy_tgt | make_buy_validation |
+      | missing_from_src | missing_from_tgt | error_message |
+
+  Scenario: Validation script execution frequency and volume
+    Given the script is scheduled to run daily on all rows in product_plant and product_plant_v2
+    And the expected volume is up to 10 million rows per table
+    Then the script must process all rows efficiently and populate pp_validation_results accordingly
+
+  Scenario: Audit trail and logging requirements
+    Given the validation process is executed
+    Then any row-level errors, mismatches, or exceptions are logged in the error_message column of pp_validation_results
+    And a summary of validation statistics (counts of matches, mismatches, errors) is logged in purgo_playground.d_product_plant_processed_error_log with timestamp and details
+
