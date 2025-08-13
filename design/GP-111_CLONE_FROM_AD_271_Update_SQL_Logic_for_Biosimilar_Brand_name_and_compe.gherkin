@@ -1,128 +1,143 @@
-Feature: Update bai_sales.sql to incorporate competitor_flag logic and brand_normalized_name change
-
-  The bai_sales.sql query must be updated to:
-  - Include competitor_flag as a string in the SELECT clause.
-  - Apply conditional logic for competitor_flag: If competitor_flag is TRUE, set integrated_units, integrated_normalized_units, and integrated_dollars to 0.
-  - Change all logic referencing brand_normalized_name = 'xyz' to 'riabni'.
-  - Ensure output fields: brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag (as string), integrated_units, integrated_normalized_units, integrated_dollars.
-  - Use Unity Catalog schema: purgo_databricks.purgo_playground.
-  - Validate correct suppression and reporting of biosimilar sales.
+Feature: Update bai_sales.sql to incorporate competitor_flag logic and change brand_normalized_name from 'xyz' to 'riabni'
 
   Background:
-    Given the source table is purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
-    And the following columns exist: brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars, cdl_effective_date
-    And the query must group by brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag
+    Given the source table is purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And the following columns are available:
+      | brand_normalized_name | normalized_name | market_normalized_name | competitor_flag | channel_name | transaction_timestamp | integrated_units | integrated_normalized_units | integrated_dollars | cdl_effective_date |
+    And competitor_flag is a boolean and must be cast to string in SELECT output
+    And brand_normalized_name must be updated: all references to 'xyz' are replaced with 'riabni' in CASE statements
+    And competitor_flag must be included in SELECT and GROUP BY clauses
+    And the query must filter records where substring(transaction_timestamp,1,10) >= add_months(cdl_effective_date, -36)
+    And the query must filter records where lower(market_normalized_name) in ('trastuzumab-anns','bevacizumab-awwb','rituximab market')
+    And the output must include competitor_flag as a string
 
-  Scenario: Happy path - competitor_flag is FALSE and brand_normalized_name is not suppressed
-    Given a record with competitor_flag = FALSE
-    And brand_normalized_name is not in ('kanjinti', 'mvasi', 'riabni')
-    When the query is executed
-    Then integrated_units, integrated_normalized_units, and integrated_dollars are summed as per source values
-    And competitor_flag is cast to string and included in the output
+  Scenario: Happy path - competitor_flag present, brand_normalized_name is not suppressed
+    Given a record with brand_normalized_name = "avastin"
+    And competitor_flag = true
+    And market_normalized_name = "bevacizumab-awwb"
+    And transaction_timestamp = "2024-05-01 00:00:00"
+    And cdl_effective_date = "2021-05-01"
+    When the SQL query is executed
+    Then the output must include competitor_flag as "true"
+    And integrated_units, integrated_normalized_units, and integrated_dollars must reflect the actual values for "avastin"
 
-  Scenario: Suppression by brand_normalized_name
-    Given a record with brand_normalized_name in ('kanjinti', 'mvasi', 'riabni')
-    When the query is executed
-    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
-    And competitor_flag is cast to string and included in the output
+  Scenario: Happy path - competitor_flag false, brand_normalized_name is suppressed
+    Given a record with brand_normalized_name = "riabni"
+    And competitor_flag = false
+    And market_normalized_name = "rituximab market"
+    And transaction_timestamp = "2024-05-01 00:00:00"
+    And cdl_effective_date = "2021-05-01"
+    When the SQL query is executed
+    Then the output must include competitor_flag as "false"
+    And integrated_units, integrated_normalized_units, and integrated_dollars must be 0 for "riabni"
 
-  Scenario: Suppression by competitor_flag
-    Given a record with competitor_flag = TRUE
-    When the query is executed
-    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
-    And competitor_flag is cast to string and included in the output
-
-  Scenario Outline: Data-driven test for suppression logic
-    Given a record with brand_normalized_name = <brand_name>
-    And competitor_flag = <comp_flag>
-    When the query is executed
-    Then integrated_units, integrated_normalized_units, and integrated_dollars are <expected_units>
-    And competitor_flag is cast to string and included in the output
-
-    Examples:
-      | brand_name | comp_flag | expected_units |
-      | kanjinti   | FALSE     | 0              |
-      | mvasi      | FALSE     | 0              |
-      | riabni     | FALSE     | 0              |
-      | abc        | TRUE      | 0              |
-      | abc        | FALSE     | source value   |
-      | riabni     | TRUE      | 0              |
-
-  Scenario: Error scenario - invalid cdl_effective_date
-    Given a record with cdl_effective_date is NULL or not a valid date
-    When the query is executed
-    Then the record is excluded from the output
-    And an error is logged in purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_invalid_cdl_effective_date_log with error_message "Invalid cdl_effective_date"
-
-  Scenario: Schema and environment validation
-    Given the query references agilisium_playground.purgo_playground
-    When the query is migrated
-    Then the schema is updated to purgo_databricks.purgo_playground
-
-  Scenario: Output field validation
-    Given the query is executed
-    When the output is generated
-    Then the output includes fields: brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag (as string), integrated_units, integrated_normalized_units, integrated_dollars
-
-  Scenario: Downstream process impact
-    Given the output structure is changed
-    When downstream reports or ETL processes consume the output
-    Then those processes must be updated to handle competitor_flag as string and new suppression logic
-
-  Scenario Outline: Validation of competitor_flag casting
-    Given a record with competitor_flag = <input_flag>
-    When the query is executed
-    Then competitor_flag in the output is "<output_flag>"
+  Scenario Outline: Error scenario - invalid cdl_effective_date or transaction_timestamp
+    Given a record with brand_normalized_name = <brand>
+    And competitor_flag = <flag>
+    And market_normalized_name = <market>
+    And transaction_timestamp = <timestamp>
+    And cdl_effective_date = <cdl_date>
+    When the SQL query is executed
+    Then the record must be excluded from the output if substring(transaction_timestamp,1,10) < add_months(cdl_effective_date, -36)
+    And the error log table purgo_playground.bai_sales_agg_obu_customer_datapack_invalid_cdl_effective_date_log must contain an entry with error_message = "Invalid cdl_effective_date or transaction_timestamp"
 
     Examples:
-      | input_flag | output_flag |
-      | TRUE       | "true"      |
-      | FALSE      | "false"     |
-      | NULL       | "null"      |
+      | brand   | flag  | market              | timestamp           | cdl_date    |
+      | avastin | true  | bevacizumab-awwb    | 2020-01-01 00:00:00 | 2021-05-01  |
+      | riabni  | false | rituximab market    | 2018-01-01 00:00:00 | 2021-05-01  |
 
-  Scenario: SQL logic output
+  Scenario Outline: Data-driven suppression logic for integrated_units, integrated_normalized_units, integrated_dollars
+    Given a record with brand_normalized_name = <brand>
+    And competitor_flag = <flag>
+    And market_normalized_name = <market>
+    And transaction_timestamp = <timestamp>
+    And cdl_effective_date = <cdl_date>
+    And integrated_units = <units>
+    And integrated_normalized_units = <norm_units>
+    And integrated_dollars = <dollars>
+    When the SQL query is executed
+    Then if lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') then integrated_units, integrated_normalized_units, and integrated_dollars must be 0
+    Else the actual values must be shown
+
+    Examples:
+      | brand     | flag  | market              | timestamp           | cdl_date    | units | norm_units | dollars |
+      | kanjinti  | true  | trastuzumab-anns    | 2024-05-01 00:00:00 | 2021-05-01  | 100   | 90         | 1000    |
+      | mvasi     | false | bevacizumab-awwb    | 2024-05-01 00:00:00 | 2021-05-01  | 200   | 180        | 2000    |
+      | riabni    | true  | rituximab market    | 2024-05-01 00:00:00 | 2021-05-01  | 300   | 270        | 3000    |
+      | avastin   | false | bevacizumab-awwb    | 2024-05-01 00:00:00 | 2021-05-01  | 400   | 360        | 4000    |
+
+  Scenario: Validation - competitor_flag must be cast to string in SELECT output
+    Given a record with competitor_flag = true
+    When the SQL query is executed
+    Then the output must show competitor_flag as "true" (string)
+    And not as boolean
+
+  Scenario: Validation - competitor_flag must be included in GROUP BY clause
+    Given multiple records with different competitor_flag values
+    When the SQL query is executed
+    Then the output must group by competitor_flag as string
+
+  Scenario: Error - brand_normalized_name is 'xyz'
+    Given a record with brand_normalized_name = "xyz"
+    When the SQL query is executed
+    Then the output must not suppress integrated_units, integrated_normalized_units, or integrated_dollars for "xyz"
+    And the suppression logic must only apply to 'kanjinti', 'mvasi', and 'riabni'
+
+  Scenario: Validation - output structure
+    Given the SQL query is executed
+    Then the output must include the following columns:
+      | brand_normalized_name | normalized_name | market_normalized_name | competitor_flag (string) | channel_name | transaction_timestamp | integrated_units | integrated_normalized_units | integrated_dollars |
+
+  Scenario: Error - competitor_flag is null
+    Given a record with competitor_flag = null
+    When the SQL query is executed
+    Then the output must show competitor_flag as "null" (string)
+    And not as boolean
+
+  Scenario: Validation - filtering by market_normalized_name
+    Given a record with market_normalized_name = "trastuzumab-anns"
+    When the SQL query is executed
+    Then the record must be included in the output
+
+  Scenario: Error - market_normalized_name not in allowed list
+    Given a record with market_normalized_name = "other-market"
+    When the SQL query is executed
+    Then the record must be excluded from the output
+
+  Scenario: Validation - filtering by transaction_timestamp and cdl_effective_date
+    Given a record with transaction_timestamp = "2020-01-01 00:00:00"
+    And cdl_effective_date = "2021-05-01"
+    When the SQL query is executed
+    Then the record must be excluded from the output
+
+  Scenario: Validation - SQL output logic
     Given the requirements above
     When the SQL query is generated
-    Then the output SQL logic is:
+    Then the final SQL must be:
+
       """
       select
         brand_normalized_name,
         normalized_name,
         market_normalized_name,
+        cast(competitor_flag as string) as competitor_flag,
         channel_name,
         transaction_timestamp,
-        cast(competitor_flag as string) as competitor_flag,
-        sum(
-          case
-            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') or competitor_flag = true
-              then 0
-            else integrated_units
-          end
-        ) as integrated_units,
-        sum(
-          case
-            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') or competitor_flag = true
-              then 0
-            else integrated_normalized_units
-          end
-        ) as integrated_normalized_units,
-        sum(
-          case
-            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni') or competitor_flag = true
-              then 0
-            else integrated_dollars
-          end
-        ) as integrated_dollars
+        sum(case when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni')
+                then 0 else integrated_units end) as integrated_units,
+        sum(case when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni')
+                then 0 else integrated_normalized_units end) as integrated_normalized_units,
+        sum(case when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni')
+                then 0 else integrated_dollars end) as integrated_dollars
       from
-        purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
-      where
-        substring(transaction_timestamp,1,10) >= add_months(cdl_effective_date, -36)
+        purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+      where substring(transaction_timestamp,1,10) >= add_months(cdl_effective_date, -36)
         and lower(market_normalized_name) in ('trastuzumab-anns','bevacizumab-awwb','rituximab market')
       group by
         brand_normalized_name,
         normalized_name,
         market_normalized_name,
+        cast(competitor_flag as string),
         channel_name,
-        transaction_timestamp,
-        competitor_flag
+        transaction_timestamp
       """
