@@ -1,182 +1,157 @@
-Feature: SQL Transformation Logic Update for pat_account Table
+Feature: SQL Transformation Logic Enhancement for pat_account Table
 
-  The transformation logic for the columns prescriber_id, patient_sf_id, hash_key, and last_modified_date in the pat_account table must be updated to align with the latest source-to-target mapping specifications. This ensures data quality, consistency, and reporting accuracy.
+  The transformation logic for the pat_account table must be updated to align with the latest source-to-target mapping specifications. This includes precise transformation rules for prescriber_id, prescriber_key, patient_sf_id, hash_key, and last_modified_date columns, with strict validation and error handling.
 
   Background:
-    Given the source table purgo_playground.p_account contains valid records
-    And the mapping rules are defined in source_target_mapping_specifications.xlsx
-    And the target table purgo_playground.pat_account has the following columns:
+    Given the source table "purgo_playground.p_account" contains columns:
+      | patient_foundation_shipment | prescriber_name_c | prescriber_name_c_address | patinet_c | recordtypeid | id | accountid |
+    And the target table "purgo_playground.pat_account" contains columns:
       | patient_foundation_shipment | prescriber_id | prescriber_key | patient_sf_id | service_request_type | case_sf_id | account_id | hash_key | last_modified_date |
-    And the ETL process is executed in Unity Catalog: purgo_databricks, Schema: purgo_playground
+    And the mapping specification is provided in "source_target_mapping_specifications.xlsx"
+    And the error log table "purgo_playground.pat_account_error_log" is available for error scenarios
 
   # Happy Path Scenarios
 
-  Scenario: Transform prescriber_id with uppercase and conditional prefix
+  Scenario: Transform prescriber_id with uppercase and DR. prefix
     Given a source record with prescriber_name_c = "john smith"
-    When the transformation logic is applied to prescriber_id
-    Then prescriber_id should be "DR.JOHN SMITH"
+    When the transformation logic is applied
+    Then prescriber_id in the target should be "DR.JOHN SMITH"
 
-  Scenario: Transform prescriber_id when prefix already present (case-insensitive)
-    Given a source record with prescriber_name_c = "Dr.Emily Jones"
-    When the transformation logic is applied to prescriber_id
-    Then prescriber_id should be "DR.EMILY JONES"
+  Scenario: Transform prescriber_id when DR. prefix already present
+    Given a source record with prescriber_name_c = "Dr.Jane Doe"
+    When the transformation logic is applied
+    Then prescriber_id in the target should be "DR.JANE DOE"
 
-  Scenario: Transform prescriber_id when prefix is present in lowercase
-    Given a source record with prescriber_name_c = "dr.michael brown"
-    When the transformation logic is applied to prescriber_id
-    Then prescriber_id should be "DR.MICHAEL BROWN"
+  Scenario: Transform prescriber_key with DR. prefix if not present
+    Given a source record with prescriber_name_c_address = "michael brown"
+    When the transformation logic is applied
+    Then prescriber_key in the target should be "DR.MICHAEL BROWN"
 
-  Scenario Outline: Transform prescriber_id for various input cases
-    Given a source record with prescriber_name_c = <input>
-    When the transformation logic is applied to prescriber_id
-    Then prescriber_id should be <expected>
+  Scenario: Transform prescriber_key when DR. prefix already present
+    Given a source record with prescriber_name_c_address = "Dr.Alice White"
+    When the transformation logic is applied
+    Then prescriber_key in the target should be "DR.ALICE WHITE"
+
+  Scenario Outline: Transform patient_sf_id based on patinet_c value
+    Given a source record with patinet_c = <patinet_c>
+    When the transformation logic is applied
+    Then patient_sf_id in the target should be <expected_patient_sf_id>
+
     Examples:
-      | input              | expected           |
-      | "john smith"       | "DR.JOHN SMITH"    |
-      | "Dr.Emily Jones"   | "DR.EMILY JONES"   |
-      | "dr.michael brown" | "DR.MICHAEL BROWN" |
-      | "DR.ANNA LEE"      | "DR.ANNA LEE"      |
-      | "Dr.JOHN DOE"      | "DR.JOHN DOE"      |
+      | patinet_c   | expected_patient_sf_id |
+      | "PAT12345"  | "PAT12345"            |
+      | "12345PAT"  | "12345PAT"            |
+      | "12345"     | NULL                  |
+      | NULL        | NULL                  |
 
-  Scenario: Transform patient_sf_id only if patinet_c contains 'PAT'
-    Given a source record with patinet_c = "PAT12345"
-    When the transformation logic is applied to patient_sf_id
-    Then patient_sf_id should be "PAT12345"
-
-  Scenario: Set patient_sf_id to NULL if patinet_c does not contain 'PAT'
-    Given a source record with patinet_c = "12345"
-    When the transformation logic is applied to patient_sf_id
-    Then patient_sf_id should be NULL
-
-  Scenario Outline: Transform patient_sf_id for various patinet_c values
-    Given a source record with patinet_c = <input>
-    When the transformation logic is applied to patient_sf_id
-    Then patient_sf_id should be <expected>
-    Examples:
-      | input      | expected    |
-      | "PAT001"   | "PAT001"    |
-      | "PAT999"   | "PAT999"    |
-      | "123456"   | NULL        |
-      | "XYZPAT"   | "XYZPAT"    |
-      | "XYZ123"   | NULL        |
-
-  Scenario: Transform hash_key by concatenating patinet_c, recordtypeid, id with underscore
-    Given a source record with patinet_c = "PAT001", recordtypeid = "RT01", id = "C123"
-    When the transformation logic is applied to hash_key
-    Then hash_key should be "PAT001_RT01_C123"
-
-  Scenario Outline: Transform hash_key for various input values
+  Scenario Outline: Generate hash_key using underscore separator and correct columns
     Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
-    When the transformation logic is applied to hash_key
-    Then hash_key should be <expected>
-    Examples:
-      | patinet_c | recordtypeid | id    | expected           |
-      | "PAT001"  | "RT01"       | "C123"| "PAT001_RT01_C123" |
-      | "PAT002"  | "RT02"       | "C456"| "PAT002_RT02_C456" |
-      | "123456"  | "RT03"       | "C789"| "123456_RT03_C789" |
+    When the transformation logic is applied
+    Then hash_key in the target should be "<patinet_c>_<recordtypeid>_<id>"
 
-  Scenario: Set last_modified_date to current ETL execution timestamp
-    Given the ETL process is running at "2024-06-10T12:34:56Z"
-    When the transformation logic is applied to last_modified_date
-    Then last_modified_date should be "2024-06-10T12:34:56Z"
+    Examples:
+      | patinet_c   | recordtypeid | id        |
+      | "PAT12345"  | "RT01"       | "C001"    |
+      | "PAT67890"  | "RT02"       | "C002"    |
+
+  Scenario: Set last_modified_date to current timestamp
+    Given a source record is being transformed
+    When the transformation logic is applied
+    Then last_modified_date in the target should be set to the current timestamp in UTC format
 
   # Error Scenarios
 
-  Scenario: Error when prescriber_name_c is NULL
-    Given a source record with prescriber_name_c = NULL
-    When the transformation logic is applied to prescriber_id
-    Then an error should be logged in pat_account_error_log with
-      | error_col      | error_message                       |
-      | prescriber_id  | "prescriber_name_c is NULL"         |
+  Scenario Outline: Error when prescriber_name_c is NULL or empty
+    Given a source record with prescriber_name_c = <prescriber_name_c>
+    When the transformation logic is applied
+    Then an error log entry should be created in pat_account_error_log with:
+      | error_col      | error_message                                 |
+      | prescriber_id  | "prescriber_name_c is NULL or empty"          |
 
-  Scenario: Error when patinet_c is NULL
-    Given a source record with patinet_c = NULL
-    When the transformation logic is applied to patient_sf_id
-    Then an error should be logged in pat_account_error_log with
-      | error_col      | error_message                       |
-      | patient_sf_id  | "patinet_c is NULL"                 |
+    Examples:
+      | prescriber_name_c |
+      | NULL              |
+      | ""                |
 
-  Scenario: Error when recordtypeid or id is NULL for hash_key
-    Given a source record with recordtypeid = NULL or id = NULL
-    When the transformation logic is applied to hash_key
-    Then an error should be logged in pat_account_error_log with
-      | error_col | error_message                        |
-      | hash_key  | "recordtypeid or id is NULL"         |
+  Scenario Outline: Error when prescriber_name_c_address is NULL or empty
+    Given a source record with prescriber_name_c_address = <prescriber_name_c_address>
+    When the transformation logic is applied
+    Then an error log entry should be created in pat_account_error_log with:
+      | error_col      | error_message                                 |
+      | prescriber_key | "prescriber_name_c_address is NULL or empty"  |
 
-  Scenario: Error when ETL timestamp is not available for last_modified_date
-    Given the ETL process does not provide a timestamp
-    When the transformation logic is applied to last_modified_date
-    Then an error should be logged in pat_account_error_log with
-      | error_col         | error_message                        |
-      | last_modified_date| "ETL execution timestamp missing"    |
+    Examples:
+      | prescriber_name_c_address |
+      | NULL                     |
+      | ""                       |
+
+  Scenario Outline: Error when patinet_c is NULL or does not contain 'PAT'
+    Given a source record with patinet_c = <patinet_c>
+    When the transformation logic is applied
+    Then patient_sf_id in the target should be NULL
+    And an error log entry should be created in pat_account_error_log with:
+      | error_col      | error_message                                 |
+      | patient_sf_id  | "patinet_c is NULL or does not contain 'PAT'" |
+
+    Examples:
+      | patinet_c |
+      | NULL      |
+      | "12345"   |
+
+  Scenario Outline: Error when any of hash_key source columns are NULL
+    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
+    When the transformation logic is applied
+    Then hash_key in the target should be NULL
+    And an error log entry should be created in pat_account_error_log with:
+      | error_col | error_message                                      |
+      | hash_key  | "One or more source columns for hash_key are NULL" |
+
+    Examples:
+      | patinet_c | recordtypeid | id     |
+      | NULL      | "RT01"       | "C001" |
+      | "PAT12345"| NULL         | "C001" |
+      | "PAT12345"| "RT01"       | NULL   |
+
+  Scenario: Error when last_modified_date cannot be set
+    Given a system error occurs during timestamp generation
+    When the transformation logic is applied
+    Then an error log entry should be created in pat_account_error_log with:
+      | error_col          | error_message                        |
+      | last_modified_date | "Failed to set last_modified_date"   |
 
   # Validation Rules
 
-  Scenario Outline: Validate prescriber_id transformation rules
-    Given a source record with prescriber_name_c = <input>
+  Scenario Outline: Validate data types and nullability for target columns
+    Given a transformed record in pat_account
+    When the record is inserted
+    Then the following columns must conform to data type and nullability rules:
+      | Column              | Data Type | Nullability |
+      | patient_foundation_shipment | string    | nullable    |
+      | prescriber_id               | string    | nullable    |
+      | prescriber_key              | string    | nullable    |
+      | patient_sf_id               | string    | nullable    |
+      | service_request_type        | string    | nullable    |
+      | case_sf_id                  | string    | nullable    |
+      | account_id                  | string    | nullable    |
+      | hash_key                    | string    | nullable    |
+      | last_modified_date          | timestamp | nullable    |
+
+  # Data-driven scenario for all transformation rules
+
+  Scenario Outline: Full transformation and validation for pat_account record
+    Given a source record with:
+      | prescriber_name_c         | prescriber_name_c_address | patinet_c   | recordtypeid | id     | accountid   |
+      | <prescriber_name_c>       | <prescriber_name_c_address> | <patinet_c> | <recordtypeid> | <id> | <accountid> |
     When the transformation logic is applied
-    Then prescriber_id must:
-      | - be uppercase
-      | - start with "DR."
-      | - not contain duplicate "DR." prefix
-    And prescriber_id should be <expected>
+    Then the target record should have:
+      | prescriber_id   | prescriber_key   | patient_sf_id   | hash_key                  | last_modified_date |
+      | <prescriber_id> | <prescriber_key> | <patient_sf_id> | <hash_key>                | <last_modified_date> |
+
     Examples:
-      | input              | expected           |
-      | "john smith"       | "DR.JOHN SMITH"    |
-      | "Dr.John Smith"    | "DR.JOHN SMITH"    |
-      | "DR.JOHN SMITH"    | "DR.JOHN SMITH"    |
-      | "dr.john smith"    | "DR.JOHN SMITH"    |
-
-  Scenario Outline: Validate patient_sf_id conditional logic
-    Given a source record with patinet_c = <input>
-    When the transformation logic is applied
-    Then patient_sf_id must be <expected>
-    Examples:
-      | input      | expected    |
-      | "PAT001"   | "PAT001"    |
-      | "123456"   | NULL        |
-
-  Scenario Outline: Validate hash_key concatenation and format
-    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
-    When the transformation logic is applied
-    Then hash_key must be <expected>
-    And hash_key must use underscore (_) as delimiter
-    And hash_key must not contain NULL values
-    Examples:
-      | patinet_c | recordtypeid | id    | expected           |
-      | "PAT001"  | "RT01"       | "C123"| "PAT001_RT01_C123" |
-      | "PAT002"  | "RT02"       | "C456"| "PAT002_RT02_C456" |
-
-  Scenario: Validate last_modified_date is set to ETL execution timestamp
-    Given the ETL process is running at "2024-06-10T12:34:56Z"
-    When the transformation logic is applied
-    Then last_modified_date must be "2024-06-10T12:34:56Z"
-    And last_modified_date must be in ISO 8601 format
-
-  # Data-driven Error Logging
-
-  Scenario Outline: Error logging for invalid input data
-    Given a source record with <error_col> = <error_value>
-    When the transformation logic is applied
-    Then an error should be logged in pat_account_error_log with
-      | error_col      | error_message                       |
-      | <error_col>    | <error_message>                     |
-    Examples:
-      | error_col         | error_value | error_message                        |
-      | prescriber_id     | NULL        | "prescriber_name_c is NULL"          |
-      | patient_sf_id     | NULL        | "patinet_c is NULL"                  |
-      | hash_key          | NULL        | "recordtypeid or id is NULL"         |
-      | last_modified_date| NULL        | "ETL execution timestamp missing"    |
-
-  # Acceptance Criteria
-
-  Scenario: All transformation rules are applied as per mapping specification
-    Given the source data and mapping specification
-    When the ETL process runs
-    Then prescriber_id, patient_sf_id, hash_key, and last_modified_date in pat_account must conform to the rules:
-      | prescriber_id      | Uppercase, prefixed with "DR." only if not present, no duplicate prefix |
-      | patient_sf_id      | Value only if patinet_c contains "PAT", else NULL                      |
-      | hash_key           | Concatenation of patinet_c, recordtypeid, id with underscore (_)       |
-      | last_modified_date | Set to ETL execution timestamp in ISO 8601 format                      |
-    And any error in transformation must be logged in pat_account_error_log with appropriate error message
+      | prescriber_name_c | prescriber_name_c_address | patinet_c   | recordtypeid | id     | accountid   | prescriber_id   | prescriber_key   | patient_sf_id | hash_key                | last_modified_date      |
+      | "john smith"      | "michael brown"           | "PAT12345"  | "RT01"       | "C001" | "A001"      | "DR.JOHN SMITH" | "DR.MICHAEL BROWN" | "PAT12345"   | "PAT12345_RT01_C001"    | <current_timestamp>    |
+      | "Dr.Jane Doe"     | "Dr.Alice White"          | "12345"     | "RT02"       | "C002" | "A002"      | "DR.JANE DOE"   | "DR.ALICE WHITE"   | NULL         | "12345_RT02_C002"       | <current_timestamp>    |
+      | NULL              | "Dr.Alice White"          | "PAT67890"  | "RT03"       | "C003" | "A003"      | NULL            | "DR.ALICE WHITE"   | "PAT67890"   | "PAT67890_RT03_C003"    | <current_timestamp>    |
+      | "john smith"      | NULL                      | "PAT67890"  | NULL         | "C003" | "A003"      | "DR.JOHN SMITH" | NULL               | "PAT67890"   | NULL                    | <current_timestamp>    |
+      | "john smith"      | "michael brown"           | NULL        | "RT01"       | "C001" | "A001"      | "DR.JOHN SMITH" | "DR.MICHAEL BROWN" | NULL         | NULL                    | <current_timestamp>    |
 
