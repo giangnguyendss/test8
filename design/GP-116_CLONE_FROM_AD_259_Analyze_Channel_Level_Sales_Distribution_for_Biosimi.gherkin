@@ -1,0 +1,123 @@
+Feature: Channel-wise Biosimilar Sales Performance Analysis
+
+  This feature analyzes the sales performance of biosimilar brands (kanjinti, mvasi, riabni) across different channels (online, retail, mobile) using the purgo_playground.bai_sales_agg_obu_customer_datapack table. The analysis includes only sales data within 36 months from a specified cdl_effective_date, aggregates sales metrics, and presents results grouped by key attributes.
+
+  Background:
+    Given the Unity Catalog is "purgo_databricks"
+    And the Schema is "purgo_playground"
+    And the Source Table is "purgo_playground.bai_sales_agg_obu_customer_datapack"
+    And the brands to analyze are "kanjinti", "mvasi", "riabni"
+    And the channels to analyze are "online", "retail", "mobile"
+    And the key attributes for grouping are "brand_normalized_name", "normalized_name", "market_normalized_name", "competitor_flag", "channel_name"
+    And the sales metrics to aggregate are "integrated_units", "integrated_normalized_units", "integrated_dollars"
+    And the time window is 36 months from the provided "cdl_effective_date"
+    And the "cdl_effective_date" is in string format "yyyy-MM-dd"
+    And only records with valid, non-null "cdl_effective_date" are included
+
+  Scenario Outline: Happy Path - Aggregate sales metrics for valid biosimilar brands within 36 months
+    Given the table contains records with brand_normalized_name "<brand>"
+    And the channel_name is "<channel>"
+    And the cdl_effective_date is a valid string in "yyyy-MM-dd" format
+    And the transaction_timestamp is within 36 months from cdl_effective_date
+    When the data is filtered for brand_normalized_name in ["kanjinti", "mvasi", "riabni"]
+    And the data is filtered for channel_name in ["online", "retail", "mobile"]
+    And the data is filtered for transaction_timestamp between cdl_effective_date and cdl_effective_date + 36 months
+    And the data is grouped by brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name
+    And the sales metrics are aggregated by sum of integrated_units, sum of integrated_normalized_units, sum of integrated_dollars
+    Then the output contains a row for each unique combination of brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name
+    And the output values for integrated_units, integrated_normalized_units, integrated_dollars are the correct sums for the group
+
+    Examples:
+      | brand     | channel | cdl_effective_date |
+      | kanjinti  | online  | 2021-01-01         |
+      | mvasi     | retail  | 2022-03-15         |
+      | riabni    | mobile  | 2020-07-30         |
+
+  Scenario Outline: Error Path - Invalid or Null cdl_effective_date
+    Given the table contains records with brand_normalized_name "<brand>"
+    And the channel_name is "<channel>"
+    And the cdl_effective_date is "<cdl_effective_date>"
+    When the cdl_effective_date is null or not in "yyyy-MM-dd" format
+    Then the record is excluded from the analysis
+    And an error is logged in purgo_playground.bai_sales_agg_obu_customer_datapack_invalid_cdl_effective_date_log with error_message "Invalid cdl_effective_date format"
+
+    Examples:
+      | brand     | channel | cdl_effective_date |
+      | kanjinti  | online  | null              |
+      | mvasi     | retail  | 2022/03/15        |
+      | riabni    | mobile  | 15-07-2020        |
+
+  Scenario Outline: Error Path - Transaction Timestamp Outside 36-Month Window
+    Given the table contains records with brand_normalized_name "<brand>"
+    And the channel_name is "<channel>"
+    And the cdl_effective_date is "<cdl_effective_date>"
+    And the transaction_timestamp is "<transaction_timestamp>"
+    When the transaction_timestamp is not between cdl_effective_date and cdl_effective_date + 36 months
+    Then the record is excluded from the analysis
+
+    Examples:
+      | brand     | channel | cdl_effective_date | transaction_timestamp |
+      | kanjinti  | online  | 2021-01-01         | 2024-02-02           |
+      | mvasi     | retail  | 2022-03-15         | 2025-04-01           |
+      | riabni    | mobile  | 2020-07-30         | 2023-08-01           |
+
+  Scenario Outline: Error Path - Brand Not in Target List
+    Given the table contains records with brand_normalized_name "<brand>"
+    And the channel_name is "<channel>"
+    And the cdl_effective_date is "<cdl_effective_date>"
+    When the brand_normalized_name is not in ["kanjinti", "mvasi", "riabni"]
+    Then the record is excluded from the analysis
+
+    Examples:
+      | brand      | channel | cdl_effective_date |
+      | herceptin  | online  | 2021-01-01         |
+      | avastin    | retail  | 2022-03-15         |
+      | rituxan    | mobile  | 2020-07-30         |
+
+  Scenario Outline: Error Path - Channel Not in Target List
+    Given the table contains records with brand_normalized_name "<brand>"
+    And the channel_name is "<channel>"
+    And the cdl_effective_date is "<cdl_effective_date>"
+    When the channel_name is not in ["online", "retail", "mobile"]
+    Then the record is excluded from the analysis
+
+    Examples:
+      | brand     | channel   | cdl_effective_date |
+      | kanjinti  | hospital  | 2021-01-01         |
+      | mvasi     | specialty | 2022-03-15         |
+      | riabni    | mail      | 2020-07-30         |
+
+  Scenario: Output Format Validation
+    Given the analysis is complete
+    When the output is generated
+    Then the output is a table with columns: brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, sum_integrated_units, sum_integrated_normalized_units, sum_integrated_dollars
+    And each row represents a unique combination of the grouping attributes
+    And all aggregated values are integers (for units) and decimals (for dollars)
+    And the output is suitable for export as CSV or table view
+
+  Scenario: Data Validation Rules
+    Given the table contains records for analysis
+    When the data is processed
+    Then cdl_effective_date must be a non-null string in "yyyy-MM-dd" format
+    And transaction_timestamp must be a valid timestamp
+    And integrated_units, integrated_normalized_units, integrated_dollars must be non-negative integers or decimals
+    And competitor_flag must be boolean (true/false)
+    And channel_name must be one of ["online", "retail", "mobile"]
+    And brand_normalized_name must be one of ["kanjinti", "mvasi", "riabni"]
+
+  Scenario: Logging Invalid Records
+    Given a record is excluded due to invalid cdl_effective_date
+    When the record is processed
+    Then the record is written to purgo_playground.bai_sales_agg_obu_customer_datapack_invalid_cdl_effective_date_log
+    And the error_message column contains a description of the error
+
+  Scenario: No Data for Brand/Channel
+    Given the table contains no records for brand_normalized_name "<brand>" and channel_name "<channel>" within the 36-month window
+    When the analysis is performed
+    Then the output does not contain a row for that brand/channel combination
+
+    Examples:
+      | brand     | channel |
+      | kanjinti  | online  |
+      | mvasi     | retail  |
+      | riabni    | mobile  |
