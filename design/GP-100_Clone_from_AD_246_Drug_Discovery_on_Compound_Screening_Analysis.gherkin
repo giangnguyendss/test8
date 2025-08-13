@@ -1,0 +1,156 @@
+Feature: Compound Drug Analysis Aggregation and Categorization
+
+  This feature performs calculations, aggregations, joins, and filtering on the compound screening analysis data from the purgo_playground.compound_drug_analysis table. It generates insights by grouping by therapeutic_area, calculating averages and totals, filtering by approval and validation, joining results, computing overall_score, and categorizing compound potential.
+
+  Background:
+    Given the source table is "purgo_playground.compound_drug_analysis"
+    And the table contains columns: study_id, compound_id, mutation_id, therapeutic_area, drug_name, ic50, auc, efficacy, toxicity, potency, sample_size, mutation_frequency, mutation_severity, compound_concentration, cell_viability, growth_inhibition, result, approved_flag, validation_status, status, created_by, score1, score2, score3, score4, score5
+    And the filter criteria are: approved_flag = '1' and validation_status = 'valid'
+    And the join key is therapeutic_area
+    And overall_score is calculated as the average of score1, score2, score3, score4, score5
+    And potential_category is assigned as:
+      | overall_score range | potential_category   |
+      | 70 <= score <= 100  | High Potential      |
+      | 60 <= score < 70    | Moderate Potential |
+      | score < 60          | Low Potential      |
+    And null or missing values in score1 to score5 are excluded from the average calculation (i.e., average is computed over non-null scores only)
+    And the final output includes all columns from compound_drug_analysis plus avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count, overall_score, potential_category
+
+  Scenario: Happy Path - Aggregation, Filtering, Join, and Categorization
+    Given the compound_drug_analysis table contains valid data for multiple therapeutic_area values
+    When the data is filtered to include only rows where approved_flag = '1' and validation_status = 'valid'
+    And the filtered data is grouped by therapeutic_area to calculate:
+      | avg_ic50         | average of ic50 (double, 2 decimal places)         |
+      | avg_auc          | average of auc (double, 2 decimal places)          |
+      | avg_efficacy     | average of efficacy (double, 2 decimal places)     |
+      | total_sample_size| sum of sample_size (bigint)                        |
+      | study_count      | count of study_id (bigint)                         |
+    And the filtered data is joined with the aggregated data on therapeutic_area
+    And for each row, overall_score is calculated as the average of non-null score1, score2, score3, score4, score5 (double, 2 decimal places)
+    And potential_category is assigned based on overall_score:
+      | overall_score range | potential_category   |
+      | 70 <= score <= 100  | High Potential      |
+      | 60 <= score < 70    | Moderate Potential |
+      | score < 60          | Low Potential      |
+    Then the final output displays all columns from compound_drug_analysis plus avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count, overall_score, potential_category
+
+  Scenario Outline: Data-driven Test for Potential Category Assignment
+    Given a compound record with score1 = <score1>, score2 = <score2>, score3 = <score3>, score4 = <score4>, score5 = <score5>
+    When overall_score is calculated as the average of non-null scores
+    Then the potential_category should be "<expected_category>"
+
+    Examples:
+      | score1 | score2 | score3 | score4 | score5 | expected_category   |
+      | 80     | 90     | 85     | 75     | 95     | High Potential     |
+      | 65     | 62     | 68     | 66     | 64     | Moderate Potential |
+      | 55     | 58     | 59     | 57     | 56     | Low Potential      |
+      | 100    | 100    | 100    | 100    | 100    | High Potential     |
+      | 70     | 70     | 70     | 70     | 70     | High Potential     |
+      | 60     | 60     | 60     | 60     | 60     | Moderate Potential |
+      | 59.99  | 59.99  | 59.99  | 59.99  | 59.99  | Low Potential      |
+      | 80     | null   | 90     | null   | 100    | High Potential     |
+      | null   | null   | null   | null   | 100    | High Potential     |
+      | null   | null   | null   | null   | 59     | Low Potential      |
+
+  Scenario: Error - Missing or Null Score Values
+    Given a compound record where all score1, score2, score3, score4, score5 are null
+    When overall_score is calculated
+    Then an error is raised with message "Overall score cannot be calculated: all score values are null"
+
+  Scenario: Error - Invalid Approved Flag or Validation Status
+    Given a compound record with approved_flag != '1' or validation_status != 'valid'
+    When the filter is applied
+    Then the record is excluded from the analysis
+
+  Scenario: Error - Invalid Data Types
+    Given a compound record where ic50, auc, efficacy, or sample_size contain non-numeric values
+    When aggregation is performed
+    Then an error is raised with message "Invalid data type for aggregation column: <column_name>"
+
+  Scenario: Error - Duplicate Therapeutic Area Values
+    Given multiple records with the same therapeutic_area but conflicting aggregated values
+    When the join is performed
+    Then the join uses therapeutic_area as the key and retains all matching records, resolving conflicts by aggregating as specified
+
+  Scenario: Output Schema and Column Order
+    Given the final output is generated
+    Then the output schema should be:
+      | study_id                | string, nullable      |
+      | compound_id             | string, nullable      |
+      | mutation_id             | string, nullable      |
+      | therapeutic_area        | string, nullable      |
+      | drug_name               | string, nullable      |
+      | ic50                    | double, nullable      |
+      | auc                     | double, nullable      |
+      | efficacy                | double, nullable      |
+      | toxicity                | double, nullable      |
+      | potency                 | double, nullable      |
+      | sample_size             | bigint, nullable      |
+      | mutation_frequency      | bigint, nullable      |
+      | mutation_severity       | bigint, nullable      |
+      | compound_concentration  | double, nullable      |
+      | cell_viability          | double, nullable      |
+      | growth_inhibition       | double, nullable      |
+      | result                  | string, nullable      |
+      | approved_flag           | bigint, nullable      |
+      | validation_status       | string, nullable      |
+      | status                  | string, nullable      |
+      | created_by              | string, nullable      |
+      | score1                  | double, nullable      |
+      | score2                  | double, nullable      |
+      | score3                  | double, nullable      |
+      | score4                  | double, nullable      |
+      | score5                  | double, nullable      |
+      | avg_ic50                | double, nullable      |
+      | avg_auc                 | double, nullable      |
+      | avg_efficacy            | double, nullable      |
+      | total_sample_size       | bigint, nullable      |
+      | study_count             | bigint, nullable      |
+      | overall_score           | double, nullable      |
+      | potential_category      | string, nullable      |
+
+  Scenario: Output Includes Both Raw and Aggregated Data
+    Given the final output is generated
+    Then each row contains both the original compound_drug_analysis columns and the aggregated columns (avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count, overall_score, potential_category)
+
+  Scenario: Handling Nulls in Aggregation
+    Given some records have null values in ic50, auc, efficacy, or sample_size
+    When aggregation is performed
+    Then averages are calculated over non-null values only
+    And total_sample_size is the sum of non-null sample_size values
+
+  Scenario: Join Analysis
+    Given the filtered compound_drug_analysis data and the aggregated data grouped by therapeutic_area
+    When the join is performed on therapeutic_area
+    Then all columns from the filtered data and the aggregated columns are included in the output
+
+  Scenario: Filter Analysis
+    Given the compound_drug_analysis table
+    When filtering by approved_flag = '1' and validation_status = 'valid'
+    Then only records meeting both criteria are included in the analysis
+
+  Scenario: Aggregation Analysis
+    Given the filtered data
+    When grouping by therapeutic_area
+    Then calculate:
+      | avg_ic50         | average of ic50 (double, 2 decimal places)         |
+      | avg_auc          | average of auc (double, 2 decimal places)          |
+      | avg_efficacy     | average of efficacy (double, 2 decimal places)     |
+      | total_sample_size| sum of sample_size (bigint)                        |
+      | study_count      | count of study_id (bigint)                         |
+
+  Scenario: Result Analysis
+    Given a compound record with non-null score1 to score5
+    When overall_score is calculated as the average of non-null scores
+    Then potential_category is assigned according to the defined ranges
+
+  Scenario: Error - No Matching Records After Filter
+    Given the compound_drug_analysis table
+    When filtering by approved_flag = '1' and validation_status = 'valid' results in no records
+    Then the output is an empty result set
+
+  Scenario: Error - Null Therapeutic Area
+    Given a compound record with therapeutic_area = null
+    When grouping and joining by therapeutic_area
+    Then the record is excluded from aggregation and join
+
