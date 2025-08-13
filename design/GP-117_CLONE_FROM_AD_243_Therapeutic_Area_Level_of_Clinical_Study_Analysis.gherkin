@@ -1,125 +1,127 @@
 Feature: Therapeutic Area Study Aggregation and Analysis
 
-  This feature aggregates study data by therapeutic area, providing insights into study counts, completion status, ongoing status, and average enrolled subjects. The results are displayed in the table "purgo_playground.study_therapeutic_analysis_results" with columns: therapeutic_area, total_studies, completed_studies, ongoing_studies, avg_enrolled_subjects.
+  This feature aggregates study data by therapeutic area to provide insights into study progress and effectiveness. It calculates total studies, completed studies, ongoing studies, and average enrolled subjects per therapeutic area, and outputs results to the purgo_playground.study_therapeutic_analysis_results table.
 
   Background:
-    Given the authoritative source for study status and subject counts is "purgo_playground.study_therapeutic_analysis"
-    And the table "purgo_playground.study_therapeutic_analysis" contains columns: therapeutic_area, study_title, study_conduct_status, enrolled_subjects_qty
-    And the output table is "purgo_playground.study_therapeutic_analysis_results" with columns: therapeutic_area, total_studies, completed_studies, ongoing_studies, avg_enrolled_subjects
-    And only records with non-null therapeutic_area are included
-    And therapeutic_area values are used as-is (no mapping/normalization required)
-    And all records are considered (no date range filter)
-    And duplicate "total_studies" column in output is removed (only one total_studies column)
-    And null enrolled_subjects_qty values are excluded from avg_enrolled_subjects calculation
+    Given the source table "purgo_playground.study_therapeutic_analysis" exists in Unity Catalog "purgo_databricks" schema "purgo_playground"
+    And the output table "purgo_playground.study_therapeutic_analysis_results" exists with columns: therapeutic_area, total_studies, completed_studies, ongoing_studies, avg_enrolled_subjects
+    And the column "study_conduct_status" may contain values such as "Completed", "Ongoing", "Terminated", "Withdrawn", "Suspended", "Planned", "Unknown"
+    And the column "enrolled_subjects_qty" may contain null values
+    And grouping is to be performed by "therapeutic_area"
+    And "total_studies" is defined as the count of unique "study_title" per "therapeutic_area"
+    And "completed_studies" is the count of studies where "study_conduct_status" = "Completed"
+    And "ongoing_studies" is the count of studies where "study_conduct_status" = "Ongoing"
+    And "avg_enrolled_subjects" is the average of "enrolled_subjects_qty" per "therapeutic_area", excluding nulls
+    And duplicate "study_title" within a "therapeutic_area" is counted once for "total_studies"
+    And only studies with non-null "therapeutic_area" and non-null "study_title" are included in the analysis
 
-  Scenario: Aggregate study data by therapeutic area (happy path)
-    Given the table "purgo_playground.study_therapeutic_analysis" contains valid data for therapeutic_area, study_conduct_status, enrolled_subjects_qty
-    When the data is grouped by therapeutic_area
-    Then total_studies is calculated as the count of all studies per therapeutic_area
-    And completed_studies is calculated as the count of studies where study_conduct_status = "Completed" per therapeutic_area
-    And ongoing_studies is calculated as the count of studies where study_conduct_status = "Ongoing" per therapeutic_area
-    And avg_enrolled_subjects is calculated as the average of enrolled_subjects_qty per therapeutic_area, excluding nulls
-    And the results are written to "purgo_playground.study_therapeutic_analysis_results" with columns: therapeutic_area, total_studies, completed_studies, ongoing_studies, avg_enrolled_subjects
+  Scenario: Aggregate study data for each therapeutic area (happy path)
+    Given the table "purgo_playground.study_therapeutic_analysis" contains valid data for multiple therapeutic areas
+    When the aggregation logic is executed
+    Then the results table "purgo_playground.study_therapeutic_analysis_results" should contain one row per therapeutic_area
+    And each row should have:
+      | therapeutic_area | total_studies | completed_studies | ongoing_studies | avg_enrolled_subjects |
+    And "total_studies" should be the count of unique "study_title" per therapeutic_area
+    And "completed_studies" should be the count of studies with "study_conduct_status" = "Completed" per therapeutic_area
+    And "ongoing_studies" should be the count of studies with "study_conduct_status" = "Ongoing" per therapeutic_area
+    And "avg_enrolled_subjects" should be the average of "enrolled_subjects_qty" per therapeutic_area, excluding nulls
 
   Scenario Outline: Data-driven aggregation for multiple therapeutic areas
     Given the table "purgo_playground.study_therapeutic_analysis" contains studies for <therapeutic_area>
     When the aggregation logic is executed
-    Then the output for <therapeutic_area> should be:
-      | therapeutic_area | total_studies | completed_studies | ongoing_studies | avg_enrolled_subjects |
+    Then the results table should contain a row for <therapeutic_area> with:
+      | therapeutic_area   | total_studies | completed_studies | ongoing_studies | avg_enrolled_subjects |
       | <therapeutic_area> | <total_studies> | <completed_studies> | <ongoing_studies> | <avg_enrolled_subjects> |
 
     Examples:
       | therapeutic_area | total_studies | completed_studies | ongoing_studies | avg_enrolled_subjects |
-      | Oncology         | 10            | 6                 | 4               | 120.5                 |
-      | Cardiology       | 8             | 3                 | 5               | 98.0                  |
-      | Neurology        | 5             | 2                 | 3               | 75.2                  |
+      | Oncology         | 5             | 2                 | 3               | 120.0                 |
+      | Cardiology       | 3             | 1                 | 2               | 85.5                  |
+      | Neurology        | 4             | 3                 | 1               | 60.0                  |
 
-  Scenario: Handle null or missing values in key columns
-    Given the table "purgo_playground.study_therapeutic_analysis" contains records with null therapeutic_area
+  Scenario: Exclude studies with null therapeutic_area or study_title
+    Given the table contains studies with null "therapeutic_area" or null "study_title"
     When the aggregation logic is executed
-    Then records with null therapeutic_area are excluded from the results
+    Then studies with null "therapeutic_area" or null "study_title" should be excluded from all counts and averages
 
-    Given the table contains records with null enrolled_subjects_qty
-    When calculating avg_enrolled_subjects
-    Then null enrolled_subjects_qty values are excluded from the average calculation
+  Scenario: Handle null enrolled_subjects_qty in average calculation
+    Given some studies have null "enrolled_subjects_qty"
+    When calculating "avg_enrolled_subjects"
+    Then only non-null "enrolled_subjects_qty" values should be included in the average
+    And if all values are null for a therapeutic_area, "avg_enrolled_subjects" should be null
 
-    Given the table contains records with null study_conduct_status
-    When calculating completed_studies and ongoing_studies
-    Then records with null study_conduct_status are not counted in completed_studies or ongoing_studies
+  Scenario: Handle duplicate study_title within a therapeutic_area
+    Given multiple rows exist for the same "study_title" within a "therapeutic_area"
+    When calculating "total_studies"
+    Then "total_studies" should count each unique "study_title" only once per therapeutic_area
 
-  Scenario: Error handling for invalid study_conduct_status values
-    Given the table "purgo_playground.study_therapeutic_analysis" contains records with study_conduct_status not in ["Completed", "Ongoing"]
+  Scenario: Error when source table is missing
+    Given the table "purgo_playground.study_therapeutic_analysis" does not exist
     When the aggregation logic is executed
-    Then such records are counted in total_studies but not in completed_studies or ongoing_studies
+    Then an error should be raised with message "Source table purgo_playground.study_therapeutic_analysis not found"
 
-  Scenario: Error handling for missing output table
-    Given the output table "purgo_playground.study_therapeutic_analysis_results" does not exist
-    When the aggregation logic attempts to write results
-    Then an error is raised with message "Output table purgo_playground.study_therapeutic_analysis_results does not exist"
+  Scenario: Error when output table is missing
+    Given the table "purgo_playground.study_therapeutic_analysis_results" does not exist
+    When attempting to write results
+    Then an error should be raised with message "Output table purgo_playground.study_therapeutic_analysis_results not found"
 
-  Scenario: Validation of output data types and formats
+  Scenario: Ignore studies with status not in Completed or Ongoing for status counts
+    Given studies exist with "study_conduct_status" values other than "Completed" or "Ongoing"
+    When calculating "completed_studies" and "ongoing_studies"
+    Then only studies with "study_conduct_status" = "Completed" are counted in "completed_studies"
+    And only studies with "study_conduct_status" = "Ongoing" are counted in "ongoing_studies"
+    And studies with other statuses are ignored for these counts
+
+  Scenario: Output format validation
     Given the aggregation logic has completed
-    When the results are written to "purgo_playground.study_therapeutic_analysis_results"
-    Then therapeutic_area is a non-null string
-    And total_studies, completed_studies, ongoing_studies are non-negative integers
-    And avg_enrolled_subjects is a double with up to 2 decimal places
-
-  Scenario: Exclusion of irrelevant study types or products
-    Given there are no specified filters or exclusions for study types, statuses, or products
-    When the aggregation logic is executed
-    Then all studies in "purgo_playground.study_therapeutic_analysis" are included in the aggregation
-
-  Scenario: Output display requirements
-    Given the aggregation logic has completed
-    When the results are available
-    Then the results are displayed in the table "purgo_playground.study_therapeutic_analysis_results" with columns: therapeutic_area, total_studies, completed_studies, ongoing_studies, avg_enrolled_subjects
-
-  Scenario: Calculation rules for aggregation
-    Given the following calculation rules:
-      | Field                | Rule                                                                 |
-      | total_studies        | COUNT(*) per therapeutic_area                                        |
-      | completed_studies    | COUNT(*) where study_conduct_status = "Completed" per therapeutic_area|
-      | ongoing_studies      | COUNT(*) where study_conduct_status = "Ongoing" per therapeutic_area |
-      | avg_enrolled_subjects| AVG(enrolled_subjects_qty) per therapeutic_area, excluding nulls     |
-    When the aggregation logic is executed
-    Then the output values follow these rules
-
-  Scenario: Data integrity validation
-    Given the aggregation logic has completed
-    When the results are written
-    Then for each therapeutic_area, total_studies >= completed_studies + ongoing_studies
-    And completed_studies and ongoing_studies are mutually exclusive per study
-
-  Scenario: Error scenario for all null enrolled_subjects_qty
-    Given all enrolled_subjects_qty values for a therapeutic_area are null
-    When calculating avg_enrolled_subjects
-    Then avg_enrolled_subjects is set to null for that therapeutic_area
-
-  Scenario: Error scenario for all null study_conduct_status
-    Given all study_conduct_status values for a therapeutic_area are null
-    When calculating completed_studies and ongoing_studies
-    Then completed_studies and ongoing_studies are set to 0 for that therapeutic_area
-
-  Scenario: Data-driven test for null and non-null enrolled_subjects_qty
-    Given the table "purgo_playground.study_therapeutic_analysis" contains the following data:
-      | therapeutic_area | study_conduct_status | enrolled_subjects_qty |
-      | Oncology         | Completed            | 100                   |
-      | Oncology         | Ongoing              | null                  |
-      | Oncology         | Completed            | 150                   |
-      | Oncology         | Ongoing              | 120                   |
-    When the aggregation logic is executed
-    Then the output for Oncology should be:
+    When results are written to "purgo_playground.study_therapeutic_analysis_results"
+    Then each row must have:
       | therapeutic_area | total_studies | completed_studies | ongoing_studies | avg_enrolled_subjects |
-      | Oncology         | 4             | 2                 | 2               | 123.33                |
+    And "total_studies", "completed_studies", "ongoing_studies" must be bigint
+    And "avg_enrolled_subjects" must be double or null
 
-  Scenario: Data-driven test for invalid study_conduct_status values
-    Given the table "purgo_playground.study_therapeutic_analysis" contains the following data:
-      | therapeutic_area | study_conduct_status | enrolled_subjects_qty |
-      | Cardiology       | Completed            | 80                    |
-      | Cardiology       | Ongoing              | 100                   |
-      | Cardiology       | Terminated           | 90                    |
-      | Cardiology       | null                 | 110                   |
+  Scenario: Data freshness requirement not specified
+    Given no timeframe or data freshness filter is specified
     When the aggregation logic is executed
-    Then the output for Cardiology should be:
+    Then all historical data in "purgo_playground.study_therapeutic_analysis" should be included
+
+  Scenario: No join or enrichment required unless specified
+    Given no instruction to join with mapping tables or other enrichment sources
+    When the aggregation logic is executed
+    Then only data from "purgo_playground.study_therapeutic_analysis" should be used
+
+  Scenario: Exclude studies with missing data in required fields
+    Given studies exist with missing "therapeutic_area" or "study_title"
+    When the aggregation logic is executed
+    Then these studies should be excluded from all calculations
+
+  Scenario: Error when all enrolled_subjects_qty are null for a therapeutic_area
+    Given all studies for a therapeutic_area have null "enrolled_subjects_qty"
+    When calculating "avg_enrolled_subjects"
+    Then "avg_enrolled_subjects" should be null for that therapeutic_area
+
+  Scenario: Validate status mapping for completed and ongoing studies
+    Given "study_conduct_status" values may include "Completed", "Ongoing", "Terminated", "Withdrawn", "Suspended", "Planned", "Unknown"
+    When calculating "completed_studies" and "ongoing_studies"
+    Then only "Completed" is mapped to "completed_studies"
+    And only "Ongoing" is mapped to "ongoing_studies"
+    And other statuses are ignored
+
+  Scenario: Validate aggregation with mixed status and nulls
+    Given the following data:
+      | therapeutic_area | study_title | study_conduct_status | enrolled_subjects_qty |
+      | Oncology         | Study A     | Completed            | 100                  |
+      | Oncology         | Study B     | Ongoing              | 120                  |
+      | Oncology         | Study C     | Terminated           | 110                  |
+      | Oncology         | Study D     | Completed            | null                 |
+      | Oncology         | Study E     | Ongoing              | 140                  |
+      | Oncology         | Study A     | Completed            | 100                  |
+    When the aggregation logic is executed
+    Then the results for Oncology should be:
       | therapeutic_area | total_studies | completed_studies | ongoing_studies | avg_enrolled_subjects |
-      | Cardiology       | 4             | 1                 | 1               | 95.0                  |
+      | Oncology         | 5             | 2                 | 2               | 117.5                 |
+    And "total_studies" counts unique study_title (Study A, B, C, D, E)
+    And "completed_studies" counts studies with status "Completed" (Study A, Study D)
+    And "ongoing_studies" counts studies with status "Ongoing" (Study B, Study E)
+    And "avg_enrolled_subjects" averages non-null enrolled_subjects_qty (100, 120, 110, 140) = (100+120+110+140)/4 = 117.5
+
