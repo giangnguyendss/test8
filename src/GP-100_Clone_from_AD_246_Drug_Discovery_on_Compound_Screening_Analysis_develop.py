@@ -1,134 +1,150 @@
 spark.catalog.setCurrentCatalog("purgo_databricks")
 
-# ------------------------------------------------------------------------------------
-# Compound Drug Analysis Aggregation and Categorization - PySpark Implementation
-# ------------------------------------------------------------------------------------
-# This script performs the following:
-# - Reads compound_drug_analysis from Unity Catalog
-# - Filters for approved_flag = 1 and validation_status = 'valid'
-# - Groups by therapeutic_area to calculate avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count
-# - Joins filtered data with aggregated data on therapeutic_area
-# - Calculates overall_score (average of non-null score1..score5)
-# - Assigns potential_category based on overall_score
-# - Outputs all columns from compound_drug_analysis plus aggregation and result columns
-# ------------------------------------------------------------------------------------
-# Assumptions:
-# - spark session is available in Databricks
-# - Table purgo_playground.compound_drug_analysis exists and is accessible
-# - No temp views or temp tables are used
-# - All code is Databricks-compatible
-# ------------------------------------------------------------------------------------
+# /* 
+# Compound Drug Analysis Aggregation and Potential Categorization
+# PySpark implementation for purgo_playground.compound_drug_analysis
+# Unity Catalog: purgo_databricks
+# Schema: purgo_playground
+#
+# This script:
+#   - Reads compound_drug_analysis from Unity Catalog
+#   - Filters for approved_flag = 1 and validation_status = "valid"
+#   - Aggregates by therapeutic_area: avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count
+#   - Joins filtered data with aggregated metrics on therapeutic_area
+#   - Calculates overall_score as mean of non-null score1..score5
+#   - Categorizes each row as High/Moderate/Low Potential based on overall_score
+#   - Handles nulls, out-of-range, and invalid types
+#   - Displays all columns from compound_drug_analysis plus analysis columns
+#   - Follows Databricks best practices and PySpark patterns
+# */
 
-# from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
+# ----------------------------------------
+# Imports
+# ----------------------------------------
 from pyspark.sql import functions as F  
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType  
+from pyspark.sql.types import DoubleType, LongType, StringType  
+from pyspark.sql.utils import AnalysisException  
 
-# ------------------------------------------------------------------------------------
-# Section: Helper UDFs
-# ------------------------------------------------------------------------------------
+# ----------------------------------------
+# Read source table from Unity Catalog
+# ----------------------------------------
+try:
+    df = spark.read.table("purgo_playground.compound_drug_analysis")
+except AnalysisException as e:
+    # Handle missing table gracefully
+    raise RuntimeError(f"Table not found: {e}")
 
-# UDF to calculate overall_score (average of non-null score1..score5, rounded to 2 decimals)
-overall_score_udf = F.udf(
-    lambda s1, s2, s3, s4, s5: (
-        round(
-            sum([x for x in [s1, s2, s3, s4, s5] if x is not None]) /
-            len([x for x in [s1, s2, s3, s4, s5] if x is not None]), 2
-        ) if len([x for x in [s1, s2, s3, s4, s5] if x is not None]) > 0 else None
-    ),
-    DoubleType()
-)
+# ----------------------------------------
+# Data Quality: Validate required columns and types
+# ----------------------------------------
+required_cols = [
+    "study_id", "compound_id", "mutation_id", "therapeutic_area", "drug_name",
+    "ic50", "auc", "efficacy", "sample_size",
+    "approved_flag", "validation_status",
+    "score1", "score2", "score3", "score4", "score5"
+]
+missing_cols = [c for c in required_cols if c not in df.columns]
+if missing_cols:
+    raise RuntimeError(f"Missing required column(s): {', '.join(missing_cols)}")
 
-# UDF to assign potential_category based on overall_score
-def assign_potential_category(score):
-    if score is None:
-        return None
-    if 70 <= score <= 100:
-        return "High Potential"
-    elif 60 <= score < 70:
-        return "Moderate Potential"
-    elif score < 60:
-        return "Low Potential"
-    else:
-        return None
+# Convert critical columns to correct types, handle invalids as nulls
+for col, dtype in [("ic50", DoubleType()), ("auc", DoubleType()), ("efficacy", DoubleType()), ("sample_size", LongType()),
+                   ("score1", DoubleType()), ("score2", DoubleType()), ("score3", DoubleType()), ("score4", DoubleType()), ("score5", DoubleType())]:
+    df = df.withColumn(col, F.col(col).cast(dtype))
 
-potential_category_udf = F.udf(assign_potential_category, StringType())
-
-# ------------------------------------------------------------------------------------
-# Section: Read Source Table
-# ------------------------------------------------------------------------------------
-
-df = spark.table("purgo_playground.compound_drug_analysis")
-
-# ------------------------------------------------------------------------------------
-# Section: Filter Analysis
-# ------------------------------------------------------------------------------------
-
+# ----------------------------------------
+# Filter: Only approved and valid rows
+# ----------------------------------------
 filtered_df = df.filter(
-    (F.col("approved_flag") == 1) &
-    (F.col("validation_status") == "valid") &
-    (F.col("therapeutic_area").isNotNull())
+    (F.col("approved_flag") == 1) & (F.col("validation_status") == "valid")
 )
 
-# ------------------------------------------------------------------------------------
-# Section: Aggregation Analysis
-# ------------------------------------------------------------------------------------
-
+# ----------------------------------------
+# Aggregation: By therapeutic_area
+# ----------------------------------------
 agg_df = filtered_df.groupBy("therapeutic_area").agg(
-    F.round(F.avg("ic50"), 2).alias("avg_ic50"),
-    F.round(F.avg("auc"), 2).alias("avg_auc"),
-    F.round(F.avg("efficacy"), 2).alias("avg_efficacy"),
+    F.avg("ic50").alias("avg_ic50"),
+    F.avg("auc").alias("avg_auc"),
+    F.avg("efficacy").alias("avg_efficacy"),
     F.sum("sample_size").alias("total_sample_size"),
     F.count("study_id").alias("study_count")
 )
 
-# ------------------------------------------------------------------------------------
-# Section: Join Analysis
-# ------------------------------------------------------------------------------------
-
+# ----------------------------------------
+# Join: Filtered data with aggregated metrics
+# ----------------------------------------
 joined_df = filtered_df.join(
     agg_df,
     on="therapeutic_area",
     how="inner"
 )
 
-# ------------------------------------------------------------------------------------
-# Section: Result Analysis (overall_score, potential_category)
-# ------------------------------------------------------------------------------------
-
-result_df = joined_df.withColumn(
-    "overall_score",
-    overall_score_udf(
-        F.col("score1"),
-        F.col("score2"),
-        F.col("score3"),
-        F.col("score4"),
-        F.col("score5")
-    )
+# ----------------------------------------
+# Result Analysis: overall_score calculation
+# ----------------------------------------
+# Calculate overall_score as mean of non-null score1..score5
+joined_df = joined_df.withColumn(
+    "score_array",
+    F.array("score1", "score2", "score3", "score4", "score5")
 ).withColumn(
+    "non_null_scores",
+    F.expr("filter(score_array, x -> x is not null)")
+).withColumn(
+    "overall_score",
+    F.when(
+        F.size(F.col("non_null_scores")) == 0,
+        F.lit(None).cast(DoubleType())
+    ).otherwise(
+        F.expr("aggregate(non_null_scores, 0D, (acc, x) -> acc + x, acc -> acc / size(non_null_scores))")
+    )
+)
+
+# ----------------------------------------
+# Data Quality: Out-of-range score values (0-100)
+# ----------------------------------------
+out_of_range_cond = (
+    (F.col("score1") > 100) | (F.col("score1") < 0) |
+    (F.col("score2") > 100) | (F.col("score2") < 0) |
+    (F.col("score3") > 100) | (F.col("score3") < 0) |
+    (F.col("score4") > 100) | (F.col("score4") < 0) |
+    (F.col("score5") > 100) | (F.col("score5") < 0)
+)
+joined_df = joined_df.withColumn(
+    "score_out_of_range",
+    F.when(out_of_range_cond, F.lit(True)).otherwise(F.lit(False))
+)
+
+# ----------------------------------------
+# Categorization: High/Moderate/Low Potential
+# ----------------------------------------
+joined_df = joined_df.withColumn(
     "potential_category",
-    potential_category_udf(F.col("overall_score"))
+    F.when(
+        (F.col("score_out_of_range") == True) | (F.col("overall_score").isNull()),
+        F.lit(None).cast(StringType())
+    ).when(
+        (F.col("overall_score") >= 70) & (F.col("overall_score") <= 100),
+        F.lit("High Potential")
+    ).when(
+        (F.col("overall_score") >= 60) & (F.col("overall_score") < 70),
+        F.lit("Moderate Potential")
+    ).when(
+        (F.col("overall_score") < 60),
+        F.lit("Low Potential")
+    ).otherwise(F.lit(None).cast(StringType()))
 )
 
-# ------------------------------------------------------------------------------------
-# Section: Output - Select Columns in Required Order
-# ------------------------------------------------------------------------------------
+# ----------------------------------------
+# Final Output: Select all columns + analysis columns
+# ----------------------------------------
+final_cols = list(df.columns) + [
+    "avg_ic50", "avg_auc", "avg_efficacy", "total_sample_size", "study_count", "overall_score", "potential_category"
+]
+final_output = joined_df.select(*final_cols)
 
-final_df = result_df.select(
-    "study_id", "compound_id", "mutation_id", "therapeutic_area", "drug_name",
-    "ic50", "auc", "efficacy", "toxicity", "potency", "sample_size",
-    "mutation_frequency", "mutation_severity", "compound_concentration",
-    "cell_viability", "growth_inhibition", "result", "approved_flag",
-    "validation_status", "status", "created_by", "score1", "score2", "score3",
-    "score4", "score5", "avg_ic50", "avg_auc", "avg_efficacy",
-    "total_sample_size", "study_count", "overall_score", "potential_category"
-)
+# ----------------------------------------
+# Display results
+# ----------------------------------------
+final_output.show(truncate=False)
 
-# ------------------------------------------------------------------------------------
-# Section: Display Results
-# ------------------------------------------------------------------------------------
-
-final_df.show(truncate=False)
-
-# ------------------------------------------------------------------------------------
-# End of Compound Drug Analysis Aggregation and Categorization - PySpark Implementation
-# ------------------------------------------------------------------------------------
+# /* End of PySpark implementation for Compound Drug Analysis */
