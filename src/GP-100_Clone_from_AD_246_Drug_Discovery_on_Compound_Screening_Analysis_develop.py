@@ -4,11 +4,11 @@
 # - Filters for approved_flag == 1 and validation_status == "valid"
 # - Aggregates by therapeutic_area: avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count
 # - Joins filtered data with aggregated metrics on therapeutic_area
-# - Computes overall_score (average of score1-5, ignoring nulls)
+# - Calculates overall_score (average of score1-5, ignoring nulls)
 # - Categorizes potential_category: High/Moderate/Low Potential
-# - Displays all source columns + aggregated metrics + overall_score + potential_category
+# - Displays all source columns plus derived metrics
 # - Handles nulls, schema validation, and data quality checks
-# - All code is Databricks-compatible and follows best practices
+# - All code is Databricks-compatible and production-ready
 # */
 
 # from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
