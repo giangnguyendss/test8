@@ -1,154 +1,178 @@
-Feature: Compound Drug Analysis Aggregation and Potential Categorization
+Feature: Compound Drug Screening Analysis and Aggregation
 
-  This feature performs compound screening analysis on the purgo_playground.compound_drug_analysis table, including filtering, aggregation, joining, and result categorization based on overall_score.
+  This feature performs compound screening analysis on the purgo_playground.compound_drug_analysis table, including filtering, aggregation, joining, scoring, and categorization to generate comprehensive insights per therapeutic area.
 
   Background:
-    Given the source table is "purgo_playground.compound_drug_analysis" in Unity Catalog "purgo_databricks" schema "purgo_playground"
+    Given the source table is "purgo_playground.compound_drug_analysis" in Unity Catalog "purgo_databricks"
     And the table contains columns: study_id, compound_id, mutation_id, therapeutic_area, drug_name, ic50, auc, efficacy, toxicity, potency, sample_size, mutation_frequency, mutation_severity, compound_concentration, cell_viability, growth_inhibition, result, approved_flag, validation_status, status, created_by, score1, score2, score3, score4, score5
 
-  # Happy Path: Valid Filtering, Aggregation, Join, and Categorization
+  # Happy Path: Filtering, Aggregation, Join, Scoring, Categorization
 
-  Scenario: Filter, aggregate, join, and categorize compound drug analysis data
-    Given the compound_drug_analysis table contains rows with approved_flag = 1 and validation_status = "valid"
+  Scenario: Filter and aggregate compound drug analysis data by therapeutic area
+    Given the compound_drug_analysis table contains valid data
     When the data is filtered to include only rows where approved_flag = 1 and validation_status = "valid"
-    And the filtered data is grouped by therapeutic_area to calculate:
-      | avg_ic50         | average of ic50 (double, nullable)           |
-      | avg_auc          | average of auc (double, nullable)            |
-      | avg_efficacy     | average of efficacy (double, nullable)       |
-      | total_sample_size| sum of sample_size (bigint, nullable)        |
-      | study_count      | count of study_id (string, nullable)         |
-    And the filtered data is joined with the aggregated data on therapeutic_area
-    And for each row, overall_score is calculated as the mean of score1, score2, score3, score4, score5, ignoring nulls
-    And each row is categorized as:
-      | High Potential     | overall_score >= 70 and <= 100 |
-      | Moderate Potential | overall_score >= 60 and < 70   |
-      | Low Potential      | overall_score < 60             |
-    Then the final output includes all columns from compound_drug_analysis plus avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count, overall_score, and potential_category
+    And the filtered data is grouped by therapeutic_area
+    Then calculate the following per therapeutic_area:
+      | Metric                | Calculation                                      |
+      | avg_ic50              | Average of ic50, ignoring nulls                  |
+      | avg_auc               | Average of auc, ignoring nulls                   |
+      | avg_efficacy          | Average of efficacy, ignoring nulls              |
+      | total_sample_size     | Sum of sample_size, treating null as 0           |
+      | study_count           | Count of unique study_id                         |
+    And the aggregated results are joined with the filtered data on therapeutic_area
+    And for each row, overall_score is calculated as the average of score1, score2, score3, score4, score5, ignoring nulls
+    And potential_category is assigned as follows:
+      | overall_score range | potential_category    |
+      | 70 <= score <= 100 | High Potential        |
+      | 60 <= score < 70   | Moderate Potential    |
+      | score < 60         | Low Potential         |
+    And the final output includes all source columns, aggregated metrics, overall_score, and potential_category
 
-  # Error Scenario: Filtering with No Valid Rows
+  # Error Scenarios
 
-  Scenario: No rows match filter criteria
+  Scenario Outline: Error when required columns are missing
+    Given the compound_drug_analysis table is missing column "<missing_column>"
+    When the analysis is executed
+    Then an error is raised with message "Column <missing_column> not found in source table"
+
+    Examples:
+      | missing_column   |
+      | ic50            |
+      | auc             |
+      | efficacy        |
+      | sample_size     |
+      | study_id        |
+      | score1          |
+      | score2          |
+      | score3          |
+      | score4          |
+      | score5          |
+      | therapeutic_area|
+
+  Scenario: Error when no rows match filter criteria
     Given the compound_drug_analysis table contains no rows where approved_flag = 1 and validation_status = "valid"
-    When the data is filtered to include only rows where approved_flag = 1 and validation_status = "valid"
+    When the analysis is executed
     Then the output is an empty result set
 
-  # Error Scenario: Invalid Data Types
-
-  Scenario Outline: Invalid data types in critical columns
-    Given the compound_drug_analysis table contains a row with <column> value as <invalid_value>
-    When the data is processed for aggregation and scoring
-    Then an error is raised with message "<error_message>"
+  Scenario Outline: Error when data types are invalid
+    Given the compound_drug_analysis table contains a row where <column> has an invalid value "<invalid_value>"
+    When the analysis is executed
+    Then an error is raised with message "Invalid value '<invalid_value>' in column <column>"
 
     Examples:
-      | column      | invalid_value | error_message                                      |
-      | ic50        | "abc"         | "Invalid data type for ic50: expected double"      |
-      | auc         | "xyz"         | "Invalid data type for auc: expected double"       |
-      | efficacy    | "none"        | "Invalid data type for efficacy: expected double"  |
-      | sample_size | "ten"         | "Invalid data type for sample_size: expected bigint"|
-      | score1      | "NaN"         | "Invalid data type for score1: expected double"    |
+      | column      | invalid_value |
+      | ic50        | "abc"         |
+      | auc         | "NaN"         |
+      | efficacy    | "null"        |
+      | sample_size | "-10"         |
+      | score1      | "xyz"         |
 
-  # Error Scenario: Null or Missing Scores
+  # Data-driven Scenarios for Scoring and Categorization
 
-  Scenario Outline: Calculation of overall_score with missing/null scores
-    Given a row in compound_drug_analysis with score1=<score1>, score2=<score2>, score3=<score3>, score4=<score4>, score5=<score5>
-    When overall_score is calculated as the mean of available (non-null) scores
-    Then overall_score is <expected_score>
-    And potential_category is assigned based on overall_score
+  Scenario Outline: Calculate overall_score and potential_category for various score combinations
+    Given a compound_drug_analysis row with score1=<score1>, score2=<score2>, score3=<score3>, score4=<score4>, score5=<score5>
+    When overall_score is calculated as the average of non-null scores
+    Then the overall_score is <expected_score>
+    And the potential_category is <expected_category>
 
     Examples:
-      | score1 | score2 | score3 | score4 | score5 | expected_score | potential_category   |
+      | score1 | score2 | score3 | score4 | score5 | expected_score | expected_category   |
       | 80     | 90     | 85     | 75     | 95     | 85             | High Potential      |
-      | 65     | 70     | null   | 60     | 65     | 65             | Moderate Potential  |
-      | 55     | null   | null   | 50     | 45     | 50             | Low Potential       |
-      | null   | null   | null   | null   | null   | null           | null                |
+      | 65     | 62     | 68     | 70     | 66     | 66.2           | Moderate Potential  |
+      | 55     | 58     | 59     | 57     | 56     | 57             | Low Potential       |
+      | 100    | null   | 90     | 80     | 70     | 85             | High Potential      |
+      | null   | null   | 60     | 65     | 70     | 65             | Moderate Potential  |
+      | null   | null   | null   | null   | null   | null           | Low Potential       |
 
-  # Error Scenario: Out-of-Range Score Values
+  # Null and Missing Value Handling
 
-  Scenario Outline: Score values outside valid range
-    Given a row in compound_drug_analysis with score1=<score1>, score2=<score2>, score3=<score3>, score4=<score4>, score5=<score5>
-    When overall_score is calculated
-    Then an error is raised with message "Score value out of valid range (0-100)"
-
-    Examples:
-      | score1 | score2 | score3 | score4 | score5 |
-      | 120    | 90     | 85     | 75     | 95     |
-      | -10    | 70     | 65     | 60     | 65     |
-
-  # Data-Driven Test: Aggregation and Categorization by Therapeutic Area
-
-  Scenario Outline: Aggregation and categorization for multiple therapeutic areas
-    Given the compound_drug_analysis table contains rows for therapeutic_area "<therapeutic_area>" with ic50 values <ic50_list>, auc values <auc_list>, efficacy values <efficacy_list>, sample_size values <sample_size_list>, and study_ids <study_id_list>
-    When the data is grouped by therapeutic_area
-    Then avg_ic50 is <expected_avg_ic50>
-    And avg_auc is <expected_avg_auc>
-    And avg_efficacy is <expected_avg_efficacy>
-    And total_sample_size is <expected_total_sample_size>
-    And study_count is <expected_study_count>
+  Scenario Outline: Null handling in aggregation and scoring
+    Given a compound_drug_analysis row with ic50=<ic50>, auc=<auc>, efficacy=<efficacy>, sample_size=<sample_size>, score1=<score1>, score2=<score2>, score3=<score3>, score4=<score4>, score5=<score5>
+    When aggregation and scoring are performed
+    Then null values in ic50, auc, efficacy are ignored in averages
+    And null sample_size is treated as 0 in total_sample_size
+    And overall_score is calculated as the average of non-null scores
+    And if all scores are null, overall_score is null and potential_category is "Low Potential"
 
     Examples:
-      | therapeutic_area | ic50_list      | auc_list       | efficacy_list   | sample_size_list | study_id_list      | expected_avg_ic50 | expected_avg_auc | expected_avg_efficacy | expected_total_sample_size | expected_study_count |
-      | Oncology        | 50,60,70       | 200,220,210    | 80,85,90        | 100,120,110      | S1,S2,S3           | 60                | 210              | 85                    | 330                      | 3                   |
-      | Cardiology      | 40,45          | 180,190        | 70,75           | 90,95            | S4,S5              | 42.5              | 185              | 72.5                  | 185                      | 2                   |
+      | ic50  | auc   | efficacy | sample_size | score1 | score2 | score3 | score4 | score5 |
+      | 50.0  | null  | 80.0     | 10          | 80     | 90     | null   | 85     | 95     |
+      | null  | null  | null     | null        | null   | null   | null   | null   | null   |
+      | 60.0  | 70.0  | null     | 5           | 65     | 62     | 68     | 70     | 66     |
 
-  # Error Scenario: Duplicate Therapeutic Area Mapping
+  # Output Format
 
-  Scenario: Compound maps to multiple therapeutic areas
-    Given a compound_id maps to multiple therapeutic_area values in compound_drug_analysis
-    When the data is grouped by therapeutic_area
-    Then the compound is included in each therapeutic_area group for aggregation and categorization
+  Scenario: Output includes all required columns and derived metrics
+    Given the analysis is completed successfully
+    When the results are displayed
+    Then the output includes:
+      | Column Name           | Description                                      |
+      | study_id              | Source study identifier                          |
+      | compound_id           | Source compound identifier                       |
+      | mutation_id           | Source mutation identifier                       |
+      | therapeutic_area      | Source therapeutic area                          |
+      | drug_name             | Source drug name                                 |
+      | ic50                  | Source ic50 value                                |
+      | auc                   | Source auc value                                 |
+      | efficacy              | Source efficacy value                            |
+      | toxicity              | Source toxicity value                            |
+      | potency               | Source potency value                             |
+      | sample_size           | Source sample size                               |
+      | mutation_frequency    | Source mutation frequency                        |
+      | mutation_severity     | Source mutation severity                         |
+      | compound_concentration| Source compound concentration                    |
+      | cell_viability        | Source cell viability                            |
+      | growth_inhibition     | Source growth inhibition                         |
+      | result                | Source result                                    |
+      | approved_flag         | Source approved flag                             |
+      | validation_status     | Source validation status                         |
+      | status                | Source status                                    |
+      | created_by            | Source created by                                |
+      | score1                | Source score1                                    |
+      | score2                | Source score2                                    |
+      | score3                | Source score3                                    |
+      | score4                | Source score4                                    |
+      | score5                | Source score5                                    |
+      | avg_ic50              | Aggregated average ic50 per therapeutic_area     |
+      | avg_auc               | Aggregated average auc per therapeutic_area      |
+      | avg_efficacy          | Aggregated average efficacy per therapeutic_area |
+      | total_sample_size     | Aggregated total sample_size per therapeutic_area|
+      | study_count           | Aggregated count of unique study_id per area     |
+      | overall_score         | Calculated average of scores per row             |
+      | potential_category    | Categorized potential per row                    |
 
-  # Error Scenario: Join Failure
+  # Join Analysis
 
-  Scenario: Join fails due to missing therapeutic_area in aggregated data
-    Given a row in filtered compound_drug_analysis with therapeutic_area "RareDisease" not present in aggregated data
+  Scenario: Join filtered data with aggregated metrics on therapeutic_area
+    Given filtered compound_drug_analysis data and aggregated metrics per therapeutic_area
     When the join is performed on therapeutic_area
-    Then the row is excluded from the final output
+    Then each row in the output contains both the original row data and the corresponding aggregated metrics for its therapeutic_area
 
-  # Error Scenario: Large Data Volume
+  # Data Scope
 
-  Scenario: Data volume exceeds processing threshold
-    Given the compound_drug_analysis table contains more than 10 million rows
+  Scenario: Analysis is performed on the entire compound_drug_analysis table
+    Given no additional filtering criteria are specified
     When the analysis is executed
-    Then the process completes successfully within acceptable performance limits
+    Then all rows in compound_drug_analysis are considered for filtering, aggregation, and output
 
-  # Error Scenario: Missing Required Columns
+  # Business Logic for Study Count
 
-  Scenario Outline: Missing required columns in source table
-    Given the compound_drug_analysis table is missing column <missing_column>
+  Scenario: Study count is calculated as count of unique study_id per therapeutic_area
+    Given the data is grouped by therapeutic_area
+    When study_count is calculated
+    Then study_count equals the number of distinct study_id values in each therapeutic_area group
+
+  # Mapping/Enrichment
+
+  Scenario: No mapping or enrichment from other tables is performed
+    Given the requirements do not specify enrichment from therapeutic_area_mapping or other tables
     When the analysis is executed
-    Then an error is raised with message "Missing required column: <missing_column>"
+    Then only data from compound_drug_analysis is used
 
-    Examples:
-      | missing_column |
-      | ic50          |
-      | auc           |
-      | efficacy      |
-      | sample_size   |
-      | score1        |
-      | score2        |
-      | score3        |
-      | score4        |
-      | score5        |
+  # Versioning/Automation
 
-  # Error Scenario: Invalid Approved Flag or Validation Status
-
-  Scenario Outline: Invalid values for approved_flag or validation_status
-    Given a row in compound_drug_analysis with approved_flag=<approved_flag> and validation_status=<validation_status>
-    When the data is filtered
-    Then the row is excluded from the analysis
-
-    Examples:
-      | approved_flag | validation_status |
-      | 0             | valid            |
-      | 1             | invalid          |
-      | 0             | invalid          |
-      | null          | valid            |
-      | 1             | null             |
-
-  # Error Scenario: Output Schema Validation
-
-  Scenario: Output includes all required columns
-    Given the final output is generated
-    When the output schema is validated
-    Then the output includes all columns from compound_drug_analysis plus avg_ic50, avg_auc, avg_efficacy, total_sample_size, study_count, overall_score, and potential_category
+  Scenario: No versioning or update frequency requirements specified
+    Given the requirements do not specify automation or scheduling
+    When the analysis is executed
+    Then the process is assumed to be ad-hoc and manual
 
