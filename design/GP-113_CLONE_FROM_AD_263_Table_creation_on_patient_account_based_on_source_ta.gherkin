@@ -1,0 +1,149 @@
+Feature: Patient Account Table Creation and Data Transformation
+
+  The system must create the target table purgo_playground.patient_account in Unity Catalog purgo_databricks, 
+  by transforming and loading data from purgo_playground.pa_account according to the mapping specification.
+  The process must enforce all schema, transformation, validation, and error handling rules as described.
+
+  Background:
+    Given the source table purgo_playground.pa_account exists in Unity Catalog purgo_databricks
+    And the mapping specification from source_target_mapping_specification (1).xlsx is available
+    And the target table purgo_playground.patient_account must be created with the following schema:
+      | Column Name                  | Datatype  | Nullable | Logic/Source                                                                 |
+      |-----------------------------|-----------|----------|------------------------------------------------------------------------------|
+      | patient_foundation_shipment | string    | NOT NULL | pa_account.patient_foundation_shipment (straight move)                       |
+      | prescriber_id               | string    | NOT NULL | If "Dr." not in prefix, prepend "DR." to pa_account.prescriber_name_c        |
+      | prescriber_key              | string    | NOT NULL | If "Dr." not in prefix, prepend "DR." to pa_account.prescriber_name_c_address|
+      | patient_sf_id               | string    | NOT NULL | pa_account.patinet_c (straight move)                                         |
+      | service_request_type        | string    | NOT NULL | pa_account.recordtypeid (straight move)                                      |
+      | case_sf_id                  | string    | NOT NULL | pa_account.id (straight move)                                                |
+      | account_id                  | string    | NOT NULL | pa_account.accountid (straight move)                                         |
+      | hash_key                    | string    | NOT NULL | Concatenate patinet_c#recordtypeid#id#accountid                              |
+      | last_modified_date          | timestamp | NOT NULL | Current timestamp (ETL run time)                                             |
+      | planned_date                | date      | NULLABLE | No mapping provided, set to NULL                                             |
+    And if purgo_playground.patient_account already exists, it must be dropped before creation
+    And only records from Salesforce source system must be considered
+    And only mapped columns must be included in the target table
+    And all NOT NULL columns must be populated; if source value is NULL, record must be skipped and error logged
+    And records must be filtered to only include those where patinet_c contains substring "PAT" (case-insensitive)
+    And if duplicate hash_key values are generated, the record must be skipped and error logged
+    And Unity Catalog/Databricks SQL syntax must be used for table creation
+
+  Scenario: Drop and Create Target Table
+    Given the target table purgo_playground.patient_account may already exist
+    When the ETL process starts
+    Then the table purgo_playground.patient_account must be dropped if it exists
+    And the table must be created with the schema as specified in the Background
+
+  Scenario Outline: Transform and Load Valid Patient Account Records
+    Given a source record in purgo_playground.pa_account with the following values:
+      | patient_foundation_shipment | prescriber_name_c | prescriber_name_c_address | patinet_c | recordtypeid | id | accountid |
+      | <patient_foundation_shipment> | <prescriber_name_c> | <prescriber_name_c_address> | <patinet_c> | <recordtypeid> | <id> | <accountid> |
+    And patinet_c contains substring "PAT" (case-insensitive)
+    And all source columns required for NOT NULL target columns are NOT NULL
+    And the hash_key value <hash_key> is unique in the target table
+    When the ETL process transforms and loads the record
+    Then the following target record must be created in purgo_playground.patient_account:
+      | patient_foundation_shipment | prescriber_id | prescriber_key | patient_sf_id | service_request_type | case_sf_id | account_id | hash_key | last_modified_date | planned_date |
+      | <patient_foundation_shipment> | <prescriber_id> | <prescriber_key> | <patinet_c> | <recordtypeid> | <id> | <accountid> | <hash_key> | <current_timestamp> | NULL |
+    And prescriber_id is "<prescriber_id>" where:
+      - If <prescriber_name_c> starts with "Dr." (case-insensitive), use as is
+      - Else, prepend "DR." to <prescriber_name_c>
+    And prescriber_key is "<prescriber_key>" where:
+      - If <prescriber_name_c_address> starts with "Dr." (case-insensitive), use as is
+      - Else, prepend "DR." to <prescriber_name_c_address>
+    And hash_key is the concatenation of <patinet_c>#<recordtypeid>#<id>#<accountid>
+    And last_modified_date is set to the ETL run current timestamp
+    And planned_date is set to NULL
+
+    Examples:
+      | patient_foundation_shipment | prescriber_name_c | prescriber_name_c_address | patinet_c   | recordtypeid | id         | accountid   | prescriber_id         | prescriber_key           | hash_key                                 |
+      | "SHIP123"                  | "Dr. John Smith"  | "Dr. Jane Doe"           | "PAT001"    | "SRV"        | "CASE001"  | "ACC001"    | "Dr. John Smith"      | "Dr. Jane Doe"           | "PAT001#SRV#CASE001#ACC001"              |
+      | "SHIP456"                  | "John Smith"      | "Jane Doe"               | "pat002"    | "SRV2"       | "CASE002"  | "ACC002"    | "DR. John Smith"      | "DR. Jane Doe"           | "pat002#SRV2#CASE002#ACC002"             |
+      | "SHIP789"                  | "DR. Alice"       | "DR. Bob"                | "Pat003"    | "SRV3"       | "CASE003"  | "ACC003"    | "DR. Alice"           | "DR. Bob"                | "Pat003#SRV3#CASE003#ACC003"             |
+
+  Scenario Outline: Skip Record if patinet_c Does Not Contain "PAT"
+    Given a source record in purgo_playground.pa_account with patinet_c value <patinet_c>
+    When the ETL process checks the filter condition
+    Then the record must be skipped
+    And an error must be logged with:
+      | error_col | error_message | event_time | hash_key |
+      | "patinet_c" | "patinet_c does not contain 'PAT'" | <current_timestamp> | <hash_key> |
+
+    Examples:
+      | patinet_c | hash_key                |
+      | "123456"  | "123456#SRV#CASE001#ACC001" |
+      | "ABCDEF"  | "ABCDEF#SRV2#CASE002#ACC002" |
+
+  Scenario Outline: Skip Record if Source Value for NOT NULL Column is NULL
+    Given a source record in purgo_playground.pa_account with a NULL value in <null_col>
+    And patinet_c contains substring "PAT" (case-insensitive)
+    When the ETL process checks for NOT NULL enforcement
+    Then the record must be skipped
+    And an error must be logged with:
+      | error_col | error_message | event_time | hash_key |
+      | <null_col> | "<null_col> is NULL for NOT NULL target column" | <current_timestamp> | <hash_key> |
+
+    Examples:
+      | null_col                  | hash_key                                 |
+      | "patient_foundation_shipment" | "PAT001#SRV#CASE001#ACC001"              |
+      | "prescriber_name_c"           | "PAT002#SRV2#CASE002#ACC002"             |
+      | "recordtypeid"                | "PAT003#SRV3#CASE003#ACC003"             |
+      | "id"                          | "PAT004#SRV4#CASE004#ACC004"             |
+      | "accountid"                   | "PAT005#SRV5#CASE005#ACC005"             |
+
+  Scenario Outline: Skip Record if Duplicate hash_key is Generated
+    Given a source record in purgo_playground.pa_account with hash_key value <hash_key>
+    And a record with hash_key <hash_key> already exists in purgo_playground.patient_account
+    When the ETL process checks for hash_key uniqueness
+    Then the record must be skipped
+    And an error must be logged with:
+      | error_col | error_message | event_time | hash_key |
+      | "hash_key" | "Duplicate hash_key value" | <current_timestamp> | <hash_key> |
+
+    Examples:
+      | hash_key                                 |
+      | "PAT001#SRV#CASE001#ACC001"              |
+      | "pat002#SRV2#CASE002#ACC002"             |
+
+  Scenario Outline: Error Handling for Data Type Mismatch
+    Given a source record in purgo_playground.pa_account with value <invalid_value> in <col>
+    And the value does not conform to the expected datatype for the target column
+    When the ETL process attempts to transform and load the record
+    Then the record must be skipped
+    And an error must be logged with:
+      | error_col | error_message | event_time | hash_key |
+      | <col> | "Data type mismatch for <col>: <invalid_value>" | <current_timestamp> | <hash_key> |
+
+    Examples:
+      | col                        | invalid_value | hash_key                                 |
+      | "patient_foundation_shipment" | 12345         | "PAT001#SRV#CASE001#ACC001"              |
+      | "recordtypeid"                | NULL          | "PAT002#SRV2#CASE002#ACC002"             |
+
+  Scenario: Only Mapped Columns Are Included in Target Table
+    Given the mapping specification lists only specific columns for patient_account
+    When the ETL process creates the target table
+    Then only the mapped columns must be present in purgo_playground.patient_account
+    And any additional columns from the source table must be ignored
+
+  Scenario: Planned Date Column is Always NULL
+    Given the planned_date column in purgo_playground.patient_account has no mapping or source value
+    When the ETL process loads records
+    Then planned_date must be set to NULL for all records
+
+  Scenario: Use Unity Catalog/Databricks SQL Syntax for Table Creation
+    Given the ETL process is running in Unity Catalog purgo_databricks
+    When the table purgo_playground.patient_account is created
+    Then Databricks SQL/Unity Catalog syntax must be used for DROP TABLE IF EXISTS and CREATE TABLE statements
+
+  Scenario: Only Salesforce Source System Records Are Processed
+    Given the source table purgo_playground.pa_account may contain records from multiple source systems
+    When the ETL process loads data
+    Then only records where source system is "Salesforce" must be processed
+
+  Scenario: Error Logging for Skipped Records
+    Given a record is skipped due to filter, NULL, duplicate hash_key, or data type mismatch
+    When the ETL process logs the error
+    Then the error must be recorded in purgo_playground.pat_account_error_log with:
+      | hash_key | error_col | error_message | event_time |
+    And event_time must be set to the ETL run current timestamp
+
