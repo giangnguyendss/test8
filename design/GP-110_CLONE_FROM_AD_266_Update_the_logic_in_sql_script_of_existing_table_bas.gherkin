@@ -1,231 +1,192 @@
-Feature: SQL Transformation Logic Update for pat_account Table
+Feature: SQL Transformation Logic Enhancement for purgo_playground.pat_account Table
 
-  The SQL logic for the pat_account table must be updated to align with the latest source-to-target mapping specifications. This includes transformation rules for prescriber_id, patient_sf_id, hash_key, and last_modified_date. The update must ensure data quality, consistency, and accurate downstream reporting.
+  The SQL logic for the purgo_playground.pat_account table must be updated to:
+  - Modify transformation rules for prescriber_id, patient_sf_id, and hash_key columns.
+  - Implement new logic for last_modified_date column.
+  - Ensure all changes align with the latest business requirements and mapping rules in source_target_mapping_specifications.xlsx.
+  - Guarantee data quality, consistency, and downstream reporting accuracy.
 
   Background:
     Given the source table purgo_playground.p_account contains columns:
       | patient_foundation_shipment | prescriber_name_c | prescriber_name_c_address | patinet_c | recordtypeid | id | accountid |
     And the target table purgo_playground.pat_account contains columns:
       | patient_foundation_shipment | prescriber_id | prescriber_key | patient_sf_id | service_request_type | case_sf_id | account_id | hash_key | last_modified_date |
-    And the mapping specification is provided in source_target_mapping_specifications.xlsx
-    And the SQL script is maintained in pat_account_sql_script.sql
+    And the mapping rules are defined in source_target_mapping_specifications.xlsx
 
   # Happy Path Scenarios
 
-  Scenario: Transform prescriber_id with uppercase and conditional 'DR.' prefix
+  Scenario: Transform prescriber_id with uppercase and conditional "DR." prefix
     Given a source record with prescriber_name_c = "john smith"
-    When the transformation logic is applied
-    Then prescriber_id in the target should be "DR.JOHN SMITH"
+    When the SQL transformation is executed
+    Then prescriber_id in the target table should be "DR.JOHN SMITH"
 
-  Scenario: Transform prescriber_id when 'Dr.' prefix is already present (case-insensitive)
-    Given a source record with prescriber_name_c = "Dr. Alice"
-    When the transformation logic is applied
-    Then prescriber_id in the target should be "DR.ALICE"
+  Scenario: Transform prescriber_id when "DR." prefix already present (case insensitive)
+    Given a source record with prescriber_name_c = "Dr. Jane Doe"
+    When the SQL transformation is executed
+    Then prescriber_id in the target table should be "DR. JANE DOE"
 
-  Scenario Outline: Transform prescriber_id for various input cases
+  Scenario: Transform prescriber_id with mixed case and no prefix
+    Given a source record with prescriber_name_c = "jAnE dOe"
+    When the SQL transformation is executed
+    Then prescriber_id in the target table should be "DR.JANE DOE"
+
+  Scenario Outline: Data-driven test for prescriber_id transformation
     Given a source record with prescriber_name_c = <input>
-    When the transformation logic is applied
-    Then prescriber_id in the target should be <expected>
-    Examples:
-      | input         | expected      |
-      | "john smith"  | "DR.JOHN SMITH" |
-      | "Dr. Alice"   | "DR.ALICE"      |
-      | "DR. Bob"     | "DR.BOB"        |
-      | "dr. Carol"   | "DR.CAROL"      |
-      | "DR. DAN"     | "DR.DAN"        |
-
-  Scenario: Transform prescriber_key with conditional 'DR.' prefix from prescriber_name_c_address
-    Given a source record with prescriber_name_c_address = "michael brown"
-    When the transformation logic is applied
-    Then prescriber_key in the target should be "DR.MICHAEL BROWN"
-
-  Scenario: Transform prescriber_key when 'Dr.' prefix is already present (case-insensitive)
-    Given a source record with prescriber_name_c_address = "Dr. Susan"
-    When the transformation logic is applied
-    Then prescriber_key in the target should be "DR.SUSAN"
-
-  Scenario Outline: Transform prescriber_key for various input cases
-    Given a source record with prescriber_name_c_address = <input>
-    When the transformation logic is applied
-    Then prescriber_key in the target should be <expected>
+    When the SQL transformation is executed
+    Then prescriber_id in the target table should be <expected>
     Examples:
       | input           | expected         |
-      | "michael brown" | "DR.MICHAEL BROWN" |
-      | "Dr. Susan"     | "DR.SUSAN"         |
-      | "DR. Lee"       | "DR.LEE"           |
-      | "dr. Kim"       | "DR.KIM"           |
-      | "DR. TOM"       | "DR.TOM"           |
+      | "john smith"    | "DR.JOHN SMITH" |
+      | "DR. JOHN SMITH"| "DR. JOHN SMITH"|
+      | "dr. john smith"| "DR. JOHN SMITH"|
+      | "Jane Doe"      | "DR.JANE DOE"   |
+      | "DR.Jane Doe"   | "DR. JANE DOE"  |
 
-  Scenario: Transform patient_sf_id only if patinet_c contains 'PAT'
+  Scenario: Transform patient_sf_id when patinet_c contains "PAT"
     Given a source record with patinet_c = "PAT12345"
-    When the transformation logic is applied
-    Then patient_sf_id in the target should be "PAT12345"
+    When the SQL transformation is executed
+    Then patient_sf_id in the target table should be "PAT12345"
 
-  Scenario: Set patient_sf_id to NULL if patinet_c does not contain 'PAT'
-    Given a source record with patinet_c = "ABC12345"
-    When the transformation logic is applied
-    Then patient_sf_id in the target should be NULL
+  Scenario: Set patient_sf_id to NULL when patinet_c does not contain "PAT"
+    Given a source record with patinet_c = "12345"
+    When the SQL transformation is executed
+    Then patient_sf_id in the target table should be NULL
 
-  Scenario Outline: Transform patient_sf_id for various patinet_c values
+  Scenario Outline: Data-driven test for patient_sf_id transformation
     Given a source record with patinet_c = <input>
-    When the transformation logic is applied
-    Then patient_sf_id in the target should be <expected>
+    When the SQL transformation is executed
+    Then patient_sf_id in the target table should be <expected>
     Examples:
       | input      | expected    |
       | "PAT001"   | "PAT001"    |
-      | "PAT002"   | "PAT002"    |
+      | "pat002"   | "pat002"    |
       | "123PAT"   | "123PAT"    |
-      | "XYZ123"   | NULL        |
+      | "12345"    | NULL        |
+      | "PATTY"    | "PATTY"     |
       | "PAT"      | "PAT"       |
-      | "pat123"   | NULL        |
+      | "APAT"     | "APAT"      |
+      | "XYZ"      | NULL        |
 
-  Scenario: Transform hash_key by concatenating patinet_c, recordtypeid, and id with underscore delimiter
-    Given a source record with patinet_c = "PAT001", recordtypeid = "SR01", id = "CASE123"
-    When the transformation logic is applied
-    Then hash_key in the target should be "PAT001_SR01_CASE123"
+  Scenario: Transform hash_key by concatenating patinet_c, recordtypeid, and id with underscores
+    Given a source record with patinet_c = "PAT123", recordtypeid = "RT01", id = "ID99"
+    When the SQL transformation is executed
+    Then hash_key in the target table should be "PAT123_RT01_ID99"
 
-  Scenario Outline: Transform hash_key for various input values
+  Scenario: Exclude accountid from hash_key concatenation
+    Given a source record with patinet_c = "PAT456", recordtypeid = "RT02", id = "ID88", accountid = "ACC77"
+    When the SQL transformation is executed
+    Then hash_key in the target table should be "PAT456_RT02_ID88"
+
+  Scenario Outline: Data-driven test for hash_key transformation
     Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
-    When the transformation logic is applied
-    Then hash_key in the target should be <expected>
+    When the SQL transformation is executed
+    Then hash_key in the target table should be <expected>
     Examples:
-      | patinet_c | recordtypeid | id      | expected             |
-      | "PAT001"  | "SR01"       | "CASE1" | "PAT001_SR01_CASE1"  |
-      | "PAT002"  | "SR02"       | "CASE2" | "PAT002_SR02_CASE2"  |
-      | "123PAT"  | "SR03"       | "CASE3" | "123PAT_SR03_CASE3"  |
-      | "XYZ123"  | "SR04"       | "CASE4" | "XYZ123_SR04_CASE4"  |
+      | patinet_c | recordtypeid | id    | expected           |
+      | "PAT1"    | "RT1"        | "ID1" | "PAT1_RT1_ID1"     |
+      | "PAT2"    | "RT2"        | "ID2" | "PAT2_RT2_ID2"     |
+      | "123PAT"  | "RT3"        | "ID3" | "123PAT_RT3_ID3"   |
+      | "XYZ"     | "RT4"        | "ID4" | "XYZ_RT4_ID4"      |
 
-  Scenario: Populate last_modified_date with current ETL execution timestamp
-    Given a source record is processed
-    When the transformation logic is applied
-    Then last_modified_date in the target should be set to the current timestamp in ISO 8601 format
+  Scenario: Set last_modified_date to current timestamp for each inserted row
+    Given a source record with any values
+    When the SQL transformation is executed
+    Then last_modified_date in the target table should be set to the current timestamp
 
   # Error Scenarios
 
   Scenario: Error when prescriber_name_c is NULL
     Given a source record with prescriber_name_c = NULL
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col     | error_message                       |
-      | prescriber_id | "prescriber_name_c is NULL"         |
-
-  Scenario: Error when prescriber_name_c_address is NULL
-    Given a source record with prescriber_name_c_address = NULL
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col      | error_message                          |
-      | prescriber_key | "prescriber_name_c_address is NULL"    |
+    When the SQL transformation is executed
+    Then prescriber_id in the target table should be NULL
 
   Scenario: Error when patinet_c is NULL
     Given a source record with patinet_c = NULL
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col     | error_message                |
-      | patient_sf_id | "patinet_c is NULL"          |
+    When the SQL transformation is executed
+    Then patient_sf_id in the target table should be NULL
+    And hash_key in the target table should be "_<recordtypeid>_<id>"
 
-  Scenario: Error when recordtypeid is NULL for hash_key
+  Scenario: Error when recordtypeid is NULL
     Given a source record with recordtypeid = NULL
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col | error_message                |
-      | hash_key  | "recordtypeid is NULL"       |
+    When the SQL transformation is executed
+    Then hash_key in the target table should be "<patinet_c>__<id>"
 
-  Scenario: Error when id is NULL for hash_key
+  Scenario: Error when id is NULL
     Given a source record with id = NULL
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col | error_message            |
-      | hash_key  | "id is NULL"            |
+    When the SQL transformation is executed
+    Then hash_key in the target table should be "<patinet_c>_<recordtypeid>_"
 
-  Scenario: Error when all hash_key components are NULL
-    Given a source record with patinet_c = NULL, recordtypeid = NULL, id = NULL
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col | error_message                    |
-      | hash_key  | "All hash_key components are NULL" |
+  Scenario Outline: Data-driven test for hash_key error handling
+    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
+    When the SQL transformation is executed
+    Then hash_key in the target table should be <expected>
+    Examples:
+      | patinet_c | recordtypeid | id    | expected           |
+      | NULL      | "RT1"        | "ID1" | "_RT1_ID1"         |
+      | "PAT2"    | NULL         | "ID2" | "PAT2__ID2"        |
+      | "PAT3"    | "RT3"        | NULL  | "PAT3_RT3_"        |
+      | NULL      | NULL         | NULL  | "__"               |
+
+  Scenario: Error when last_modified_date column is missing in target table schema
+    Given the target table schema does not include last_modified_date
+    When the SQL transformation is executed
+    Then the process should fail with error message "Column 'last_modified_date' does not exist in target table schema"
+
+  Scenario: Error when source columns are missing
+    Given the source table is missing prescriber_name_c, patinet_c, recordtypeid, or id
+    When the SQL transformation is executed
+    Then the process should fail with error message "Required source column(s) missing: <column_name>"
 
   # Validation Rules
 
-  Scenario Outline: Validate prescriber_id transformation
+  Scenario: Validate prescriber_id is always uppercase and prefixed with "DR." if not present
     Given a source record with prescriber_name_c = <input>
-    When the transformation logic is applied
-    Then prescriber_id must be uppercase and prefixed with "DR."
-    Examples:
-      | input         |
-      | "john smith"  |
-      | "Dr. Alice"   |
-      | "DR. Bob"     |
-      | "dr. Carol"   |
+    When the SQL transformation is executed
+    Then prescriber_id in the target table should match the regex "^DR\.[A-Z ]+$"
 
-  Scenario Outline: Validate prescriber_key transformation
-    Given a source record with prescriber_name_c_address = <input>
-    When the transformation logic is applied
-    Then prescriber_key must be uppercase and prefixed with "DR."
-    Examples:
-      | input           |
-      | "michael brown" |
-      | "Dr. Susan"     |
-      | "DR. Lee"       |
-      | "dr. Kim"       |
-
-  Scenario Outline: Validate patient_sf_id transformation
+  Scenario: Validate patient_sf_id is NULL if patinet_c does not contain "PAT"
     Given a source record with patinet_c = <input>
-    When the transformation logic is applied
-    Then patient_sf_id must be set to <expected>
+    When the SQL transformation is executed
+    Then patient_sf_id in the target table should be NULL if <input> does not contain "PAT"
+
+  Scenario: Validate hash_key format
+    Given a source record with patinet_c, recordtypeid, and id
+    When the SQL transformation is executed
+    Then hash_key in the target table should match the regex "^[^_]*_[^_]*_[^_]*$"
+
+  Scenario: Validate last_modified_date is a valid timestamp
+    Given a source record with any values
+    When the SQL transformation is executed
+    Then last_modified_date in the target table should be a valid timestamp in ISO 8601 format
+
+  # Downstream Impact
+
+  Scenario: Validate downstream reporting tables receive updated last_modified_date
+    Given a record is inserted into purgo_playground.pat_account with last_modified_date set
+    When downstream reporting ETL runs
+    Then the corresponding record in purgo_playground.pact_case should have last_modified_date matching the source
+
+  # Schema Alignment
+
+  Scenario: Validate target table schema includes last_modified_date as timestamp
+    Given the target table schema is defined
+    When the SQL transformation is executed
+    Then the schema should include last_modified_date with datatype timestamp
+
+  # Error Message Validation
+
+  Scenario Outline: Error message validation for missing columns
+    Given the source table is missing <column>
+    When the SQL transformation is executed
+    Then the process should fail with error message "Required source column(s) missing: <column>"
     Examples:
-      | input      | expected    |
-      | "PAT001"   | "PAT001"    |
-      | "XYZ123"   | NULL        |
+      | column              |
+      | prescriber_name_c   |
+      | patinet_c           |
+      | recordtypeid        |
+      | id                  |
 
-  Scenario Outline: Validate hash_key transformation
-    Given a source record with patinet_c = <patinet_c>, recordtypeid = <recordtypeid>, id = <id>
-    When the transformation logic is applied
-    Then hash_key must be <expected>
-    Examples:
-      | patinet_c | recordtypeid | id      | expected             |
-      | "PAT001"  | "SR01"       | "CASE1" | "PAT001_SR01_CASE1"  |
-      | "XYZ123"  | "SR04"       | "CASE4" | "XYZ123_SR04_CASE4"  |
-
-  Scenario: Validate last_modified_date format
-    Given a source record is processed
-    When the transformation logic is applied
-    Then last_modified_date must be a valid timestamp in ISO 8601 format
-
-  # Data-driven ETL Logging
-
-  Scenario Outline: ETL log entry for each processed record
-    Given a source record with patient_sf_id = <patient_sf_id>, prescriber_id = <prescriber_id>, hash_key = <hash_key>, account_id = <account_id>
-    When the transformation logic is applied
-    Then an ETL log entry should be created in pat_account_etl_log with
-      | patient_sf_id | prescriber_id | hash_key | account_id | last_modified_date | error_message |
-      | <patient_sf_id> | <prescriber_id> | <hash_key> | <account_id> | <last_modified_date> | NULL |
-    Examples:
-      | patient_sf_id | prescriber_id   | hash_key             | account_id | last_modified_date      |
-      | "PAT001"      | "DR.JOHN SMITH" | "PAT001_SR01_CASE1"  | "ACC001"   | "2024-06-01T12:00:00Z"  |
-      | "PAT002"      | "DR.ALICE"      | "PAT002_SR02_CASE2"  | "ACC002"   | "2024-06-01T12:01:00Z"  |
-
-  # WHERE Clause Validation
-
-  Scenario: Validate WHERE clause filter for patinet_c LIKE '%PAT%'
-    Given the transformation logic is applied
-    When the WHERE clause is evaluated
-    Then only records where patinet_c contains 'PAT' (case-sensitive) are processed
-
-  Scenario: Error if WHERE clause excludes valid patient_sf_id
-    Given a source record with patinet_c = "pat123"
-    When the transformation logic is applied
-    Then the record should not be processed and no entry should be created in pat_account
-
-  # Schema Validation
-
-  Scenario: Validate last_modified_date column exists in pat_account table
-    Given the pat_account table schema
-    When the transformation logic is applied
-    Then last_modified_date column must exist and be of type timestamp
-
-  Scenario: Error if last_modified_date column is missing in pat_account table
-    Given the pat_account table schema does not include last_modified_date
-    When the transformation logic is applied
-    Then an error log entry should be created in pat_account_error_log with
-      | error_col         | error_message                        |
-      | last_modified_date| "last_modified_date column missing"  |
+  Scenario: Error message validation for missing last_modified_date in target schema
+    Given the target table schema does not include last_modified_date
+    When the SQL transformation is executed
+    Then the process should fail with error message "Column 'last_modified_date' does not exist in target table schema"
