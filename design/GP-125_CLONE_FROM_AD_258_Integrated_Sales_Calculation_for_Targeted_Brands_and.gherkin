@@ -1,0 +1,166 @@
+Feature: SQL Aggregation of Integrated Sales Metrics by Brand, Product, Market, Competitor Flag, Channel, and Transaction Time
+
+  This feature calculates the total integrated_units, integrated_normalized_units, and integrated_dollars for each unique combination of brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, and transaction_timestamp from the purgo_playground.bai_sales_agg_obu_customer_datapack_weekly table, applying specific business rules and validation logic.
+
+  Background:
+    Given the source table is purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And the following columns are used for grouping and aggregation:
+      | brand_normalized_name |
+      | normalized_name       |
+      | market_normalized_name|
+      | competitor_flag       |
+      | channel_name          |
+      | transaction_timestamp |
+    And the aggregation columns are:
+      | integrated_units           |
+      | integrated_normalized_units|
+      | integrated_dollars         |
+    And the cdl_effective_date column is used for transaction date filtering
+    And the br_gpo_flag column is used for GPO flag filtering
+    And only rows where market_normalized_name is one of ["trastuzumab-anns", "bevacizumab-awwb", "rituximab market"] are included
+
+  Scenario: Happy path - Valid rows with no KAISER GPO flag and transaction date within 36 months
+    Given a row with brand_normalized_name = "kanjinti"
+    And br_gpo_flag does not contain "KAISER"
+    And market_normalized_name = "trastuzumab-anns"
+    And transaction_timestamp is within 36 months prior to cdl_effective_date
+    When the SQL script aggregates the row
+    Then the integrated_units, integrated_normalized_units, and integrated_dollars are summed as per their values
+
+  Scenario Outline: Error path - Brand is kanjinti, mvasi, or riabni and GPO flag contains KAISER
+    Given a row with brand_normalized_name = <brand>
+    And br_gpo_flag contains "KAISER"
+    And market_normalized_name = <market>
+    And transaction_timestamp is within 36 months prior to cdl_effective_date
+    When the SQL script aggregates the row
+    Then the integrated_units, integrated_normalized_units, and integrated_dollars are treated as zero for this row
+
+    Examples:
+      | brand    | market              |
+      | kanjinti | trastuzumab-anns    |
+      | mvasi    | bevacizumab-awwb    |
+      | riabni   | rituximab market    |
+
+  Scenario Outline: Error path - Transaction date outside 36 months window
+    Given a row with brand_normalized_name = <brand>
+    And br_gpo_flag does not contain "KAISER"
+    And market_normalized_name = <market>
+    And transaction_timestamp is more than 36 months prior to cdl_effective_date
+    When the SQL script aggregates the row
+    Then the row is excluded from aggregation
+
+    Examples:
+      | brand    | market              |
+      | kanjinti | trastuzumab-anns    |
+      | mvasi    | bevacizumab-awwb    |
+      | riabni   | rituximab market    |
+      | other    | trastuzumab-anns    |
+
+  Scenario Outline: Error path - Market not in allowed list
+    Given a row with brand_normalized_name = <brand>
+    And br_gpo_flag does not contain "KAISER"
+    And market_normalized_name = <market>
+    And transaction_timestamp is within 36 months prior to cdl_effective_date
+    When the SQL script aggregates the row
+    Then the row is excluded from aggregation
+
+    Examples:
+      | brand    | market           |
+      | kanjinti | other-market     |
+      | mvasi    | abc-market       |
+      | riabni   | xyz-market       |
+      | other    | not-in-list      |
+
+  Scenario Outline: Error path - Null or missing key columns
+    Given a row with <column> is null
+    When the SQL script aggregates the row
+    Then the row is excluded from aggregation
+
+    Examples:
+      | column                  |
+      | brand_normalized_name   |
+      | normalized_name         |
+      | market_normalized_name  |
+      | competitor_flag         |
+      | channel_name            |
+      | transaction_timestamp   |
+      | cdl_effective_date      |
+
+  Scenario Outline: Data-driven aggregation for valid combinations
+    Given a row with brand_normalized_name = <brand>
+    And normalized_name = <product>
+    And market_normalized_name = <market>
+    And competitor_flag = <competitor_flag>
+    And channel_name = <channel>
+    And transaction_timestamp = <transaction_time>
+    And br_gpo_flag does not contain "KAISER"
+    And transaction_timestamp is within 36 months prior to cdl_effective_date
+    And market_normalized_name is in ["trastuzumab-anns", "bevacizumab-awwb", "rituximab market"]
+    When the SQL script aggregates the row
+    Then the output contains the sum of integrated_units, integrated_normalized_units, and integrated_dollars for the group
+
+    Examples:
+      | brand    | product      | market              | competitor_flag | channel      | transaction_time      |
+      | kanjinti | KANJINTI     | trastuzumab-anns    | true           | HOSPITAL     | 2023-01-01T00:00:00Z |
+      | mvasi    | MVASI        | bevacizumab-awwb    | false          | RETAIL       | 2022-06-15T00:00:00Z |
+      | riabni   | RIABNI       | rituximab market    | true           | HOSPITAL     | 2021-12-01T00:00:00Z |
+      | other    | OTHERPROD    | trastuzumab-anns    | false          | RETAIL       | 2023-05-10T00:00:00Z |
+
+  Scenario: Validation - Output format and destination
+    Given the aggregation is complete
+    When the SQL script produces results
+    Then the output contains columns:
+      | brand_normalized_name      |
+      | normalized_name            |
+      | market_normalized_name     |
+      | competitor_flag            |
+      | channel_name               |
+      | transaction_timestamp      |
+      | total_integrated_units     |
+      | total_integrated_normalized_units |
+      | total_integrated_dollars  |
+    And the output is written to the specified destination (table, view, or file) as per requirements
+
+  Scenario Outline: Error path - Invalid cdl_effective_date format
+    Given a row with cdl_effective_date in an invalid format
+    When the SQL script processes the row
+    Then the row is excluded from aggregation
+    And an error message "Invalid cdl_effective_date format" is logged
+
+    Examples:
+      | cdl_effective_date |
+      | "2023/01/01"       |
+      | "01-01-2023"       |
+      | "not-a-date"       |
+      | null               |
+
+  Scenario: Validation - Handling of nulls in aggregation columns
+    Given a row with null values in integrated_units, integrated_normalized_units, or integrated_dollars
+    When the SQL script aggregates the row
+    Then null values are treated as zero in the sum
+
+  Scenario Outline: Error path - GPO flag filter applies only to bai_sales_agg_obu_customer_datapack_weekly
+    Given a row from purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And brand_normalized_name is <brand>
+    And br_gpo_flag contains "KAISER"
+    When the SQL script aggregates the row
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are treated as zero
+
+    Examples:
+      | brand    |
+      | kanjinti |
+      | mvasi    |
+      | riabni   |
+
+  Scenario Outline: Error path - GPO flag filter does not apply to other tables
+    Given a row from a table other than purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And brand_normalized_name is <brand>
+    And br_gpo_flag contains "KAISER"
+    When the SQL script aggregates the row
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are not zeroed out
+
+    Examples:
+      | brand    |
+      | kanjinti |
+      | mvasi    |
+      | riabni   |
