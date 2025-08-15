@@ -1,0 +1,148 @@
+Feature: Update bai_sales.sql to incorporate missing conditional logic for br_gpo_flag and competitor_flag
+
+  Background:
+    Given the source table is purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And the columns available are brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars, br_gpo_flag, cdl_effective_date
+    And the brands considered biosimilar are "Kanjinti", "Mvasi", "Riabni"
+    And the market_normalized_name filter values are "trastuzumab-anns", "bevacizumab-awwb", "rituximab market"
+    And the query must include competitor_flag cast to string in the SELECT and GROUP BY clauses
+    And br_gpo_flag must be treated as empty string if NULL
+    And for biosimilar brands, if br_gpo_flag contains "KAISER" (case-insensitive), units must be set to zero
+    And for biosimilar brands, if br_gpo_flag does not contain "KAISER", use the original units values
+    And for non-biosimilar brands, use the original units values regardless of br_gpo_flag
+    And the output columns must be: brand_normalized_name, normalized_name, market_normalized_name, competitor_flag (as string), channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars
+
+  Scenario: Happy path - biosimilar brand with br_gpo_flag containing "KAISER"
+    Given a row with brand_normalized_name = "Kanjinti"
+    And br_gpo_flag = "KAISER PERMANENTE"
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
+
+  Scenario: Happy path - biosimilar brand with br_gpo_flag not containing "KAISER"
+    Given a row with brand_normalized_name = "Mvasi"
+    And br_gpo_flag = "CVS"
+    And integrated_units = 100
+    And integrated_normalized_units = 80
+    And integrated_dollars = 5000
+    When the query is executed
+    Then integrated_units = 100 in the output
+    And integrated_normalized_units = 80 in the output
+    And integrated_dollars = 5000 in the output
+
+  Scenario: Happy path - non-biosimilar brand
+    Given a row with brand_normalized_name = "Herceptin"
+    And br_gpo_flag = "KAISER"
+    And integrated_units = 200
+    And integrated_normalized_units = 180
+    And integrated_dollars = 10000
+    When the query is executed
+    Then integrated_units = 200 in the output
+    And integrated_normalized_units = 180 in the output
+    And integrated_dollars = 10000 in the output
+
+  Scenario: br_gpo_flag is NULL for biosimilar brand
+    Given a row with brand_normalized_name = "Riabni"
+    And br_gpo_flag = NULL
+    And integrated_units = 50
+    And integrated_normalized_units = 40
+    And integrated_dollars = 2500
+    When the query is executed
+    Then br_gpo_flag is treated as empty string
+    And integrated_units = 50 in the output
+    And integrated_normalized_units = 40 in the output
+    And integrated_dollars = 2500 in the output
+
+  Scenario: competitor_flag is true
+    Given a row with competitor_flag = true
+    When the query is executed
+    Then competitor_flag is cast to string "true" in the output
+
+  Scenario: competitor_flag is false
+    Given a row with competitor_flag = false
+    When the query is executed
+    Then competitor_flag is cast to string "false" in the output
+
+  Scenario Outline: Error scenario - invalid market_normalized_name
+    Given a row with market_normalized_name = <invalid_market>
+    When the query is executed
+    Then the row is excluded from the output
+
+    Examples:
+      | invalid_market         |
+      | "nonexistent market"   |
+      | "other market"         |
+
+  Scenario Outline: Error scenario - transaction_timestamp before cdl_effective_date minus 36 months
+    Given a row with transaction_timestamp = <timestamp>
+    And cdl_effective_date = <cdl_date>
+    When the query is executed
+    Then the row is excluded from the output
+
+    Examples:
+      | timestamp    | cdl_date    |
+      | "2020-01-01" | "2023-01-01"|
+      | "2018-05-10" | "2021-06-15"|
+
+  Scenario Outline: Data-driven test for biosimilar brands and br_gpo_flag values
+    Given a row with brand_normalized_name = <brand>
+    And br_gpo_flag = <br_gpo_flag>
+    And integrated_units = <units>
+    And integrated_normalized_units = <norm_units>
+    And integrated_dollars = <dollars>
+    When the query is executed
+    Then integrated_units = <expected_units> in the output
+    And integrated_normalized_units = <expected_norm_units> in the output
+    And integrated_dollars = <expected_dollars> in the output
+
+    Examples:
+      | brand     | br_gpo_flag         | units | norm_units | dollars | expected_units | expected_norm_units | expected_dollars |
+      | Kanjinti  | "KAISER"            | 10    | 8          | 500     | 0              | 0                  | 0               |
+      | Mvasi     | "kaiser permanente" | 20    | 16         | 1000    | 0              | 0                  | 0               |
+      | Riabni    | "CVS"               | 30    | 24         | 1500    | 30             | 24                 | 1500            |
+      | Kanjinti  | NULL                | 40    | 32         | 2000    | 40             | 32                 | 2000            |
+
+  Scenario Outline: Data-driven test for competitor_flag casting
+    Given a row with competitor_flag = <flag>
+    When the query is executed
+    Then competitor_flag is cast to string <expected_string> in the output
+
+    Examples:
+      | flag   | expected_string |
+      | true   | "true"         |
+      | false  | "false"        |
+      | NULL   | "null"         |
+
+  Scenario: SQL output structure
+    Given the query is executed
+    Then the output columns are brand_normalized_name, normalized_name, market_normalized_name, competitor_flag (as string), channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars
+    And the output is grouped by brand_normalized_name, normalized_name, market_normalized_name, competitor_flag (as string), channel_name, transaction_timestamp
+
+  Scenario: Error scenario - br_gpo_flag contains "KAISER" for non-biosimilar brand
+    Given a row with brand_normalized_name = "Herceptin"
+    And br_gpo_flag = "KAISER"
+    And integrated_units = 100
+    When the query is executed
+    Then integrated_units = 100 in the output
+
+  Scenario: Error scenario - competitor_flag is NULL
+    Given a row with competitor_flag = NULL
+    When the query is executed
+    Then competitor_flag is cast to string "null" in the output
+
+  Scenario: Error scenario - br_gpo_flag is NULL for non-biosimilar brand
+    Given a row with brand_normalized_name = "Herceptin"
+    And br_gpo_flag = NULL
+    And integrated_units = 100
+    When the query is executed
+    Then integrated_units = 100 in the output
+
+  Scenario: Error scenario - missing required columns
+    Given a row missing brand_normalized_name
+    When the query is executed
+    Then an error is raised with message "brand_normalized_name is required"
+
+  Scenario: Error scenario - invalid data type for competitor_flag
+    Given a row with competitor_flag = "yes"
+    When the query is executed
+    Then an error is raised with message "competitor_flag must be boolean or NULL"
+
