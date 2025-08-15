@@ -1,0 +1,142 @@
+Feature: Customer 360 Raw Table Backup and Vacuum Operations
+
+  The system must efficiently back up the purgo_databricks.purgo_playground.customer_360_raw table as compressed parquet files partitioned by state, and perform a vacuum operation to retain only records from the last 30 days. All operations must be logged for audit and traceability.
+
+  Background:
+    Given the source table is purgo_databricks.purgo_playground.customer_360_raw
+    And the backup volume path is "/Volumes/customer_360_raw_backup"
+    And the backup parquet files must use "snappy" compression codec
+    And the partitioning column is "state"
+    And all columns from customer_360_raw must be included in the backup
+    And the vacuum operation must use "creation_date" as the date column for retention
+    And the backup operation is scheduled to run daily at 02:00 UTC
+    And the backup retention policy is 90 days
+    And access permissions for read/write to the volume are granted to the "data_engineer" group
+    And all backup and vacuum operations must be logged in purgo_playground.customer_360_raw_backup_log
+    And null or missing values must be preserved as-is in the backup
+    And the backup must include the full table before vacuuming
+
+  Scenario: Successful backup of customer_360_raw table to compressed parquet files
+    Given the customer_360_raw table contains 100,000 records
+    When the PySpark backup script is executed
+    Then all records are written to "/Volumes/customer_360_raw_backup" as parquet files
+    And parquet files are compressed using "snappy"
+    And parquet files are partitioned by "state"
+    And all columns are included in the backup
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message |
+      | success | backup         | 100000       | NULL          |
+
+  Scenario: Successful vacuum of customer_360_raw table retaining last 30 days
+    Given the customer_360_raw table contains records with creation_date ranging from "2024-04-01" to "2024-06-15"
+    When the vacuum operation is executed on "2024-06-15"
+    Then only records with creation_date >= "2024-05-16" are retained
+    And records with creation_date < "2024-05-16" are permanently deleted
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message |
+      | success | vacuum         | <remaining_count> | NULL      |
+
+  Scenario Outline: Backup operation with invalid volume path
+    Given the backup volume path is "<invalid_path>"
+    When the PySpark backup script is executed
+    Then the backup operation fails
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message                |
+      | failed  | backup         | 0            | "Invalid volume path: <invalid_path>" |
+
+    Examples:
+      | invalid_path                  |
+      | "/Volumes/nonexistent_backup" |
+      | "/Volumes/customer_360_raw"   |
+
+  Scenario Outline: Backup operation with missing write permissions
+    Given the user executing the backup does not have write permissions to "/Volumes/customer_360_raw_backup"
+    When the PySpark backup script is executed
+    Then the backup operation fails
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message                       |
+      | failed  | backup         | 0            | "Permission denied for backup volume" |
+
+  Scenario Outline: Vacuum operation with invalid date column
+    Given the vacuum operation is configured to use "<date_column>" as the retention column
+    When the vacuum operation is executed
+    Then the vacuum operation fails
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message                                 |
+      | failed  | vacuum         | 0            | "Invalid date column for vacuum: <date_column>" |
+
+    Examples:
+      | date_column         |
+      | "last_interaction"  |
+      | "modified_date"     |
+      | "created"           |
+
+  Scenario: Backup operation with null values in columns
+    Given the customer_360_raw table contains records with null values in "email", "phone", and "notes"
+    When the PySpark backup script is executed
+    Then the backup parquet files preserve null values as-is
+    And no error is logged for null values
+
+  Scenario: Backup operation with missing required columns
+    Given the customer_360_raw table is missing the "state" column
+    When the PySpark backup script is executed
+    Then the backup operation fails
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message                |
+      | failed  | backup         | 0            | "Partition column 'state' not found in source table" |
+
+  Scenario: Backup operation with unsupported compression codec
+    Given the backup is configured to use "gzip" compression codec
+    When the PySpark backup script is executed
+    Then the backup operation fails
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message                |
+      | failed  | backup         | 0            | "Unsupported compression codec: gzip" |
+
+  Scenario Outline: Data-driven backup and vacuum operation
+    Given the customer_360_raw table contains <record_count> records
+    And the earliest creation_date is "<earliest_date>"
+    And the latest creation_date is "<latest_date>"
+    When the backup and vacuum operations are executed on "<operation_date>"
+    Then the backup parquet files contain <record_count> records
+    And the vacuumed table contains only records with creation_date >= "<retention_date>"
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message |
+      | success | backup         | <record_count> | NULL        |
+      | success | vacuum         | <retained_count> | NULL      |
+
+    Examples:
+      | record_count | earliest_date | latest_date  | operation_date | retention_date | retained_count |
+      | 50000        | 2024-05-01    | 2024-06-15   | 2024-06-15     | 2024-05-16     | 30000          |
+      | 120000       | 2024-04-10    | 2024-06-15   | 2024-06-15     | 2024-05-16     | 80000          |
+
+  Scenario: Logging of backup and vacuum operations
+    Given the backup and vacuum operations are executed successfully
+    When the operations complete
+    Then a log entry is created in customer_360_raw_backup_log for each operation with
+      | timestamp           | status  | operation_type | record_count | error_message |
+      | "2024-06-15T02:00Z" | success | backup         | <count>      | NULL          |
+      | "2024-06-15T02:10Z" | success | vacuum         | <count>      | NULL          |
+
+  Scenario: Backup operation with audit requirements
+    Given the backup operation is executed
+    When the operation completes
+    Then the log entry in customer_360_raw_backup_log must include
+      | timestamp           | status  | operation_type | record_count | error_message |
+    And the log entry must be accessible to the compliance team
+
+  Scenario: Scheduled backup operation
+    Given the backup operation is scheduled to run daily at 02:00 UTC
+    When the scheduled time is reached
+    Then the backup operation is triggered automatically
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message |
+      | success | backup         | <count>      | NULL          |
+
+  Scenario: Retention policy enforcement for backup files
+    Given backup parquet files older than 90 days exist in "/Volumes/customer_360_raw_backup"
+    When the retention policy is enforced
+    Then backup files older than 90 days are deleted
+    And a log entry is created in customer_360_raw_backup_log with
+      | status  | operation_type | record_count | error_message |
+      | success | retention      | <deleted_count> | NULL        |
