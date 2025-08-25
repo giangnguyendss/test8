@@ -1,148 +1,217 @@
-Feature: Update bai_sales.sql to incorporate missing conditional logic for br_gpo_flag and competitor_flag
+Feature: Update bai_sales.sql to incorporate conditional logic for br_gpo_flag and competitor_flag for biosimilar sales suppression
 
   Background:
     Given the source table is purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
     And the columns available are brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars, br_gpo_flag, cdl_effective_date
-    And the brands considered biosimilar are "Kanjinti", "Mvasi", "Riabni"
-    And the market_normalized_name filter values are "trastuzumab-anns", "bevacizumab-awwb", "rituximab market"
-    And the query must include competitor_flag cast to string in the SELECT and GROUP BY clauses
-    And br_gpo_flag must be treated as empty string if NULL
-    And for biosimilar brands, if br_gpo_flag contains "KAISER" (case-insensitive), units must be set to zero
-    And for biosimilar brands, if br_gpo_flag does not contain "KAISER", use the original units values
-    And for non-biosimilar brands, use the original units values regardless of br_gpo_flag
-    And the output columns must be: brand_normalized_name, normalized_name, market_normalized_name, competitor_flag (as string), channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars
+    And biosimilar brands are "Kanjinti", "Mvasi", "Riabni"
+    And br_gpo_flag may be NULL, empty string, or contain text such as "KAISER"
+    And competitor_flag is a boolean and must be cast to string in the output
+    And suppression of units/dollars for biosimilar brands occurs only when br_gpo_flag contains "KAISER" (case-insensitive)
+    And if br_gpo_flag is NULL, treat it as empty string for all logic
+    And output columns must include competitor_flag as string
 
   Scenario: Happy path - biosimilar brand with br_gpo_flag containing "KAISER"
     Given a row with brand_normalized_name = "Kanjinti"
     And br_gpo_flag = "KAISER PERMANENTE"
     When the query is executed
-    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are suppressed to 0
+    And competitor_flag is cast to string in the output
 
   Scenario: Happy path - biosimilar brand with br_gpo_flag not containing "KAISER"
     Given a row with brand_normalized_name = "Mvasi"
-    And br_gpo_flag = "CVS"
-    And integrated_units = 100
-    And integrated_normalized_units = 80
-    And integrated_dollars = 5000
+    And br_gpo_flag = "CARDINAL HEALTH"
     When the query is executed
-    Then integrated_units = 100 in the output
-    And integrated_normalized_units = 80 in the output
-    And integrated_dollars = 5000 in the output
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are not suppressed
+    And competitor_flag is cast to string in the output
 
-  Scenario: Happy path - non-biosimilar brand
-    Given a row with brand_normalized_name = "Herceptin"
-    And br_gpo_flag = "KAISER"
-    And integrated_units = 200
-    And integrated_normalized_units = 180
-    And integrated_dollars = 10000
-    When the query is executed
-    Then integrated_units = 200 in the output
-    And integrated_normalized_units = 180 in the output
-    And integrated_dollars = 10000 in the output
-
-  Scenario: br_gpo_flag is NULL for biosimilar brand
+  Scenario: Happy path - biosimilar brand with br_gpo_flag as NULL
     Given a row with brand_normalized_name = "Riabni"
-    And br_gpo_flag = NULL
-    And integrated_units = 50
-    And integrated_normalized_units = 40
-    And integrated_dollars = 2500
+    And br_gpo_flag is NULL
     When the query is executed
-    Then br_gpo_flag is treated as empty string
-    And integrated_units = 50 in the output
-    And integrated_normalized_units = 40 in the output
-    And integrated_dollars = 2500 in the output
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are not suppressed
+    And competitor_flag is cast to string in the output
 
-  Scenario: competitor_flag is true
-    Given a row with competitor_flag = true
+  Scenario: Happy path - non-biosimilar brand with any br_gpo_flag value
+    Given a row with brand_normalized_name = "Herceptin"
+    And br_gpo_flag = "KAISER PERMANENTE"
     When the query is executed
-    Then competitor_flag is cast to string "true" in the output
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are not suppressed
+    And competitor_flag is cast to string in the output
 
-  Scenario: competitor_flag is false
-    Given a row with competitor_flag = false
+  Scenario Outline: Error scenario - invalid competitor_flag value
+    Given a row with competitor_flag = <invalid_value>
     When the query is executed
-    Then competitor_flag is cast to string "false" in the output
-
-  Scenario Outline: Error scenario - invalid market_normalized_name
-    Given a row with market_normalized_name = <invalid_market>
-    When the query is executed
-    Then the row is excluded from the output
+    Then an error is raised with message "Invalid competitor_flag value: <invalid_value>"
 
     Examples:
-      | invalid_market         |
-      | "nonexistent market"   |
-      | "other market"         |
+      | invalid_value |
+      | "not_boolean" |
+      | 123           |
+      | NULL          |
 
-  Scenario Outline: Error scenario - transaction_timestamp before cdl_effective_date minus 36 months
-    Given a row with transaction_timestamp = <timestamp>
-    And cdl_effective_date = <cdl_date>
-    When the query is executed
-    Then the row is excluded from the output
-
-    Examples:
-      | timestamp    | cdl_date    |
-      | "2020-01-01" | "2023-01-01"|
-      | "2018-05-10" | "2021-06-15"|
-
-  Scenario Outline: Data-driven test for biosimilar brands and br_gpo_flag values
+  Scenario Outline: Data-driven suppression logic for biosimilar brands
     Given a row with brand_normalized_name = <brand>
-    And br_gpo_flag = <br_gpo_flag>
+    And br_gpo_flag = <gpo_flag>
     And integrated_units = <units>
-    And integrated_normalized_units = <norm_units>
+    And integrated_normalized_units = <normalized_units>
     And integrated_dollars = <dollars>
     When the query is executed
-    Then integrated_units = <expected_units> in the output
-    And integrated_normalized_units = <expected_norm_units> in the output
-    And integrated_dollars = <expected_dollars> in the output
+    Then integrated_units in output is <expected_units>
+    And integrated_normalized_units in output is <expected_normalized_units>
+    And integrated_dollars in output is <expected_dollars>
+    And competitor_flag is cast to string in the output
 
     Examples:
-      | brand     | br_gpo_flag         | units | norm_units | dollars | expected_units | expected_norm_units | expected_dollars |
-      | Kanjinti  | "KAISER"            | 10    | 8          | 500     | 0              | 0                  | 0               |
-      | Mvasi     | "kaiser permanente" | 20    | 16         | 1000    | 0              | 0                  | 0               |
-      | Riabni    | "CVS"               | 30    | 24         | 1500    | 30             | 24                 | 1500            |
-      | Kanjinti  | NULL                | 40    | 32         | 2000    | 40             | 32                 | 2000            |
+      | brand     | gpo_flag             | units | normalized_units | dollars | expected_units | expected_normalized_units | expected_dollars |
+      | Kanjinti  | "KAISER"             | 100   | 90               | 1000.0  | 0             | 0                        | 0               |
+      | Mvasi     | "kaiser permanente"  | 200   | 180              | 2000.0  | 0             | 0                        | 0               |
+      | Riabni    | "CARDINAL HEALTH"    | 300   | 270              | 3000.0  | 300           | 270                      | 3000.0          |
+      | Kanjinti  | NULL                 | 400   | 360              | 4000.0  | 400           | 360                      | 4000.0          |
+      | Mvasi     | ""                   | 500   | 450              | 5000.0  | 500           | 450                      | 5000.0          |
+      | Herceptin | "KAISER"             | 600   | 540              | 6000.0  | 600           | 540                      | 6000.0          |
 
-  Scenario Outline: Data-driven test for competitor_flag casting
-    Given a row with competitor_flag = <flag>
-    When the query is executed
-    Then competitor_flag is cast to string <expected_string> in the output
-
-    Examples:
-      | flag   | expected_string |
-      | true   | "true"         |
-      | false  | "false"        |
-      | NULL   | "null"         |
-
-  Scenario: SQL output structure
+  Scenario: SQL output includes competitor_flag as string
     Given the query is executed
-    Then the output columns are brand_normalized_name, normalized_name, market_normalized_name, competitor_flag (as string), channel_name, transaction_timestamp, integrated_units, integrated_normalized_units, integrated_dollars
-    And the output is grouped by brand_normalized_name, normalized_name, market_normalized_name, competitor_flag (as string), channel_name, transaction_timestamp
+    Then the output column competitor_flag is of type string
+    And values are "true" or "false" as string
 
-  Scenario: Error scenario - br_gpo_flag contains "KAISER" for non-biosimilar brand
-    Given a row with brand_normalized_name = "Herceptin"
-    And br_gpo_flag = "KAISER"
-    And integrated_units = 100
+  Scenario: SQL output includes correct grouping
+    Given the query is executed
+    Then the GROUP BY clause includes brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag
+
+  Scenario: SQL output logic for br_gpo_flag NULL handling
+    Given a row with br_gpo_flag = NULL
     When the query is executed
-    Then integrated_units = 100 in the output
+    Then br_gpo_flag is treated as empty string in all logic
 
-  Scenario: Error scenario - competitor_flag is NULL
+  Scenario: SQL output logic for br_gpo_flag case-insensitive matching
+    Given a row with br_gpo_flag = "kaiser permanente"
+    When the query is executed
+    Then suppression logic matches br_gpo_flag case-insensitively
+
+  Scenario: SQL output logic for biosimilar brand name case-insensitive matching
+    Given a row with brand_normalized_name = "KANJINTI"
+    When the query is executed
+    Then suppression logic matches brand_normalized_name case-insensitively
+
+  Scenario: SQL output logic for market filter
+    Given the query is executed
+    Then only rows where lower(market_normalized_name) in ('trastuzumab-anns','bevacizumab-awwb','rituximab market') are included
+
+  Scenario: SQL output logic for transaction date filter
+    Given the query is executed
+    Then only rows where substring(transaction_timestamp,1,10) >= add_months(cdl_effective_date, -36) are included
+
+  Scenario: SQL output logic for final SELECT
+    Given the query is executed
+    Then the output columns are brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp, competitor_flag (as string), sum(integrated_units), sum(integrated_normalized_units), sum(integrated_dollars)
+
+  Scenario: SQL output logic for suppression
+    Given a row with brand_normalized_name in ("Kanjinti", "Mvasi", "Riabni")
+    And br_gpo_flag contains "KAISER" (case-insensitive)
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to 0 in the output
+
+  Scenario: SQL output logic for no suppression
+    Given a row with brand_normalized_name in ("Kanjinti", "Mvasi", "Riabni")
+    And br_gpo_flag does not contain "KAISER" (case-insensitive)
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are not suppressed in the output
+
+  Scenario: SQL output logic for non-biosimilar brands
+    Given a row with brand_normalized_name not in ("Kanjinti", "Mvasi", "Riabni")
+    When the query is executed
+    Then integrated_units, integrated_normalized_units, and integrated_dollars are not suppressed in the output
+
+  Scenario: SQL output logic for competitor_flag casting
+    Given a row with competitor_flag = true
+    When the query is executed
+    Then competitor_flag in output is "true"
+    Given a row with competitor_flag = false
+    When the query is executed
+    Then competitor_flag in output is "false"
+
+  Scenario: SQL output logic for error on invalid competitor_flag
+    Given a row with competitor_flag not boolean
+    When the query is executed
+    Then an error is raised with message "Invalid competitor_flag value"
+
+  Scenario: SQL output logic for NULL competitor_flag
     Given a row with competitor_flag = NULL
     When the query is executed
-    Then competitor_flag is cast to string "null" in the output
+    Then competitor_flag in output is "NULL"
 
-  Scenario: Error scenario - br_gpo_flag is NULL for non-biosimilar brand
-    Given a row with brand_normalized_name = "Herceptin"
-    And br_gpo_flag = NULL
-    And integrated_units = 100
+  Scenario: SQL output logic for br_gpo_flag empty string
+    Given a row with br_gpo_flag = ""
     When the query is executed
-    Then integrated_units = 100 in the output
+    Then br_gpo_flag is treated as empty string in all logic
 
-  Scenario: Error scenario - missing required columns
-    Given a row missing brand_normalized_name
+  Scenario: SQL output logic for br_gpo_flag with leading/trailing spaces
+    Given a row with br_gpo_flag = "  KAISER  "
     When the query is executed
-    Then an error is raised with message "brand_normalized_name is required"
+    Then suppression logic matches br_gpo_flag after trimming spaces
 
-  Scenario: Error scenario - invalid data type for competitor_flag
-    Given a row with competitor_flag = "yes"
+  Scenario: SQL output logic for multiple biosimilar brands in one group
+    Given multiple rows with brand_normalized_name in ("Kanjinti", "Mvasi", "Riabni") and br_gpo_flag containing "KAISER"
     When the query is executed
-    Then an error is raised with message "competitor_flag must be boolean or NULL"
+    Then all integrated_units, integrated_normalized_units, and integrated_dollars are suppressed to 0 in the output group
 
+  Scenario: SQL output logic for group by competitor_flag
+    Given the query is executed
+    Then the GROUP BY clause includes competitor_flag (cast to string)
+
+  Scenario: SQL output logic for NULL handling in all columns
+    Given a row with any column as NULL
+    When the query is executed
+    Then NULL values are handled according to SQL default aggregation rules
+
+  Scenario: SQL output logic for final SQL
+    Given the requirements above
+    When the query is executed
+    Then the final SQL logic is:
+
+      """
+      select
+        brand_normalized_name,
+        normalized_name,
+        market_normalized_name,
+        channel_name,
+        transaction_timestamp,
+        cast(competitor_flag as string) as competitor_flag,
+        sum(
+          case
+            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni')
+              and instr(lower(coalesce(br_gpo_flag, '')), 'kaiser') > 0
+            then 0
+            else integrated_units
+          end
+        ) as integrated_units,
+        sum(
+          case
+            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni')
+              and instr(lower(coalesce(br_gpo_flag, '')), 'kaiser') > 0
+            then 0
+            else integrated_normalized_units
+          end
+        ) as integrated_normalized_units,
+        sum(
+          case
+            when lower(brand_normalized_name) in ('kanjinti','mvasi','riabni')
+              and instr(lower(coalesce(br_gpo_flag, '')), 'kaiser') > 0
+            then 0
+            else integrated_dollars
+          end
+        ) as integrated_dollars
+      from
+        purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+      where
+        substring(transaction_timestamp,1,10) >= add_months(cdl_effective_date, -36)
+        and lower(market_normalized_name) in ('trastuzumab-anns','bevacizumab-awwb','rituximab market')
+      group by
+        brand_normalized_name,
+        normalized_name,
+        market_normalized_name,
+        channel_name,
+        transaction_timestamp,
+        cast(competitor_flag as string)
+      """
