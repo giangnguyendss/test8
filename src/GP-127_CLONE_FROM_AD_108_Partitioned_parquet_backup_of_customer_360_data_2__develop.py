@@ -1,114 +1,110 @@
-spark.catalog.setCurrentCatalog("purgo_databricks")
-
 # ------------------------------------------------------------------------------------
-# Customer 360 Raw Table Backup and Vacuum Operations
+# Databricks PySpark Script: Backup customer_360_raw Table to Partitioned Parquet & Vacuum
 # ------------------------------------------------------------------------------------
-# Catalog: purgo_databricks
-# Schema: purgo_playground
-# Source Table: customer_360_raw
-# Backup Volume Path: /Volumes/customer_360_raw_backup
-# Compression Codec: snappy
-# Partition Column: state
-# Retention Policy: 90 days for backup files, 30 days for vacuum
-# Logging Table: customer_360_raw_backup_log
-# All columns included, nulls preserved, backup before vacuum
+# This script performs the following:
+#   1. Reads all data from purgo_databricks.purgo_playground.customer_360_raw
+#   2. Writes the data as compressed parquet files (snappy) partitioned by 'state'
+#      to /Volumes/customer_360_raw_backup/
+#   3. Performs a Delta Lake VACUUM operation on the original table, retaining only
+#      records from the last 30 days (creation_date >= current_date - 30)
+#   4. Implements error handling, schema validation, and Databricks best practices
 # ------------------------------------------------------------------------------------
-
-# Required imports for PySpark DataFrame operations and logging
-from pyspark.sql import DataFrame  
-from pyspark.sql.functions import col, lit, current_timestamp  
+# Setup: Required imports for PySpark DataFrame, types, and functions
+# from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
 from pyspark.sql.types import StructType, StructField, LongType, StringType, DateType  
-from datetime import datetime, timedelta  
+from pyspark.sql.functions import col, current_date, date_sub  
+from pyspark.sql.utils import AnalysisException  
 
 # ------------------------------------------------------------------------------------
-# Helper Function: Log backup/vacuum operation to purgo_playground.customer_360_raw_backup_log
+# Step 1: Define explicit schema matching purgo_playground.customer_360_raw
 # ------------------------------------------------------------------------------------
-def log_operation(status, operation_type, record_count, error_message=None):
-    """
-    Log backup or vacuum operation to purgo_playground.customer_360_raw_backup_log.
-    """
-    log_df = spark.createDataFrame([
-        (
-            datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            status,
-            operation_type,
-            record_count,
-            error_message
-        )
-    ], ["timestamp", "status", "operation_type", "record_count", "error_message"])
-    log_df.write.mode("append").insertInto("purgo_playground.customer_360_raw_backup_log")
+customer_360_raw_schema = StructType([
+    StructField("id", LongType(), True),
+    StructField("name", StringType(), True),
+    StructField("email", StringType(), True),
+    StructField("phone", StringType(), True),
+    StructField("company", StringType(), True),
+    StructField("job_title", StringType(), True),
+    StructField("address", StringType(), True),
+    StructField("city", StringType(), True),
+    StructField("state", StringType(), True),
+    StructField("country", StringType(), True),
+    StructField("industry", StringType(), True),
+    StructField("account_manager", StringType(), True),
+    StructField("creation_date", DateType(), True),
+    StructField("last_interaction_date", DateType(), True),
+    StructField("purchase_history", StringType(), True),
+    StructField("notes", StringType(), True),
+    StructField("zip", StringType(), True)
+])
 
 # ------------------------------------------------------------------------------------
-# Step 1: Backup customer_360_raw table to compressed parquet partitioned by state
+# Step 2: Read source table from Unity Catalog
 # ------------------------------------------------------------------------------------
 try:
-    # Read source table from Unity Catalog
-    src_df = spark.table("purgo_playground.customer_360_raw")
-    # Validate partition column exists
-    if "state" not in src_df.columns:
-        log_operation("failed", "backup", 0, "Partition column 'state' not found in source table")
-        raise Exception("Partition column 'state' not found in source table")
-    # Validate compression codec
-    supported_codecs = ["snappy"]
-    compression_codec = "snappy"
-    if compression_codec not in supported_codecs:
-        log_operation("failed", "backup", 0, f"Unsupported compression codec: {compression_codec}")
-        raise Exception(f"Unsupported compression codec: {compression_codec}")
-    # Backup path in Databricks volume
-    backup_path = "/Volumes/customer_360_raw_backup"
-    # Write all columns, preserve nulls, partition by state, use snappy compression
-    src_df.write.mode("overwrite").partitionBy("state").option("compression", compression_codec).parquet(backup_path)
-    # Count records backed up
-    backup_count = src_df.count()
-    # Log success
-    log_operation("success", "backup", backup_count, None)
+    # Set current catalog for Unity Catalog operations
+    spark.catalog.setCurrentCatalog("purgo_databricks")
+    # Read the source table
+    df_customer_360_raw = spark.table("purgo_playground.customer_360_raw")
+except AnalysisException as e:
+    # Error: Source table does not exist or cannot be read
+    raise RuntimeError(f"Error reading source table: {e}")
+
+# ------------------------------------------------------------------------------------
+# Step 3: Validate schema and column count before backup
+# ------------------------------------------------------------------------------------
+src_cols = df_customer_360_raw.columns
+expected_cols = [f.name for f in customer_360_raw_schema.fields]
+if src_cols != expected_cols:
+    raise ValueError(f"Column mismatch: Source columns {src_cols} do not match expected schema {expected_cols}")
+
+# ------------------------------------------------------------------------------------
+# Step 4: Validate and convert data types to match schema
+# ------------------------------------------------------------------------------------
+for field in customer_360_raw_schema.fields:
+    col_name = field.name
+    col_type = field.dataType
+    # If type mismatch, cast to correct type
+    if df_customer_360_raw.schema[col_name].dataType != col_type:
+        df_customer_360_raw = df_customer_360_raw.withColumn(col_name, col(col_name).cast(col_type))
+
+# ------------------------------------------------------------------------------------
+# Step 5: Backup to partitioned, compressed parquet in volume
+# ------------------------------------------------------------------------------------
+backup_path = "/Volumes/customer_360_raw_backup/"
+try:
+    # Check if partition column exists
+    if "state" not in df_customer_360_raw.columns:
+        raise ValueError("Partition column 'state' not found in source table")
+    # Write as partitioned parquet with snappy compression
+    df_customer_360_raw.write.mode("overwrite").partitionBy("state").parquet(
+        backup_path, compression="snappy"
+    )
+    # Comment: Backup written to partitioned parquet with snappy compression
 except Exception as e:
-    log_operation("failed", "backup", 0, str(e))
-    # Do not raise further to allow vacuum to proceed
+    # Error: Backup location missing, not writable, or other write error
+    raise RuntimeError(f"Error writing backup parquet: {e}")
 
 # ------------------------------------------------------------------------------------
-# Step 2: Vacuum customer_360_raw table, retain only records from last 30 days (creation_date)
+# Step 6: Delta Lake VACUUM - Retain only records from last 30 days
 # ------------------------------------------------------------------------------------
 try:
-    # Calculate retention date (30 days before now)
-    today = datetime.utcnow().date()
-    retention_date = today - timedelta(days=30)
-    # Filter records to retain
-    vacuum_df = src_df.filter(col("creation_date") >= lit(str(retention_date)))
-    retained_count = vacuum_df.count()
-    # Overwrite source table with retained records (Delta Lake format)
-    vacuum_df.write.mode("overwrite").option("overwriteSchema", "true").format("delta").saveAsTable("purgo_playground.customer_360_raw")
+    # Calculate retention date (current_date - 30)
+    retention_date = date_sub(current_date(), 30)
+    # Check if creation_date column exists
+    if "creation_date" not in df_customer_360_raw.columns:
+        raise ValueError("Date column 'creation_date' not found in source table")
+    # Filter records to retain only those within retention period
+    df_vacuumed = df_customer_360_raw.filter(col("creation_date") >= retention_date)
+    # Overwrite the original table with vacuumed data
+    df_vacuumed.write.format("delta").mode("overwrite").option("overwriteSchema", True).saveAsTable("purgo_playground.customer_360_raw")
     # Run Delta Lake VACUUM command to physically remove old files
-    spark.sql("VACUUM purgo_playground.customer_360_raw RETAIN 0 HOURS")
-    # Log success
-    log_operation("success", "vacuum", retained_count, None)
+    spark.sql("VACUUM purgo_playground.customer_360_raw RETAIN 720 HOURS")
+    # Comment: Vacuum operation completed, old records removed
 except Exception as e:
-    log_operation("failed", "vacuum", 0, str(e))
+    # Error: Vacuum failed due to missing date column, permissions, or other error
+    raise RuntimeError(f"Error during vacuum operation: {e}")
 
 # ------------------------------------------------------------------------------------
-# Step 3: Retention Policy Enforcement for Backup Files (delete backup files older than 90 days)
-# ------------------------------------------------------------------------------------
-try:
-    # Use dbutils.fs to list and delete files older than 90 days in backup volume
-    now = datetime.utcnow()
-    deleted_count = 0
-    # List all partition directories under backup_path
-    partition_dirs = [f.path for f in dbutils.fs.ls(backup_path) if f.isDir]
-    for part_dir in partition_dirs:
-        files = dbutils.fs.ls(part_dir)
-        for f in files:
-            # Only consider parquet files
-            if f.path.endswith(".parquet"):
-                # Get file modification time in milliseconds
-                mtime_ms = f.modificationTime
-                mtime = datetime.utcfromtimestamp(mtime_ms / 1000)
-                if (now - mtime).days > 90:
-                    dbutils.fs.rm(f.path)
-                    deleted_count += 1
-    log_operation("success", "retention", deleted_count, None)
-except Exception as e:
-    log_operation("failed", "retention", 0, str(e))
-
-# ------------------------------------------------------------------------------------
-# End of Script
+# End of Databricks PySpark Script for Backup and Vacuum Operations
 # ------------------------------------------------------------------------------------
