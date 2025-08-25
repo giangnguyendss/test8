@@ -1,0 +1,160 @@
+Feature: Compute and Load Metric Columns from Metric Master SQL Queries
+
+  The Databricks PySpark script computes metric columns by executing SQL queries from the metric_master table, in the order specified by the dependency column, and loads results into target tables or views as configured in metric_config.
+
+  Background:
+    Given Unity Catalog is "purgo_databricks"
+    And Unity Catalog Schema is "purgo_playground"
+    And metric configuration is sourced from "purgo_playground.metric_config"
+    And metric master queries are sourced from "purgo_playground.metric_master"
+    And only metrics with "active_indicator" = "Y" in metric_config are processed
+    And metric_config.metric_template_name matches metric_master.metric_template_name
+    And source tables and target tables exist in the schema
+    And primary_key columns exist in the source tables
+
+  Scenario Outline: Compute and load active metric columns in dependency order (happy path)
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_config for "<metric_template_name>" specifies source_table "<source_table>", primary_key "<primary_key>", and target_table "<target_table>"
+    And metric_master for "<metric_template_name>" specifies sql_query "<sql_query>", dependency "<dependency>", and view_name "<view_name>"
+    When the script executes sql_query "<sql_query>" for metric "<metric_template_name>"
+    And the results are joined with source_table "<source_table>" on primary_key "<primary_key>"
+    Then if view_name "<view_name>" is not null, the results are saved as view "<view_name>"
+    And if view_name "<view_name>" is null, the results are loaded into target_table "<target_table>" by updating or inserting metric column "<metric_template_name>"
+    And the execution status "SUCCESS" is logged in metric_audit_log_stg with start_time and end_time
+    And the loaded metric column "<metric_template_name>" in target_table "<target_table>" matches the expected data type from metric_config.metric_data_type
+
+    Examples:
+      | metric_template_name | source_table                                         | primary_key | target_table                                         | sql_query                                 | dependency | view_name         |
+      | metric_col_1        | agilisium_playground.purgo_playground.medical_inquiry_data | inquiry_id  | agilisium_playground.purgo_playground.mska           | SELECT inquiry_id, COUNT(*) AS metric_col_1 FROM agilisium_playground.purgo_playground.medical_inquiry_data GROUP BY inquiry_id | 1         | NULL             |
+      | metric_col_2        | agilisium_playground.purgo_playground.medical_inquiry_data | inquiry_id  | agilisium_playground.purgo_playground.mska           | SELECT inquiry_id, AVG(score) AS metric_col_2 FROM agilisium_playground.purgo_playground.medical_inquiry_data GROUP BY inquiry_id | 2         | metric_col_2_vw  |
+
+  Scenario Outline: Skip inactive metric columns
+    Given metric "<metric_template_name>" is inactive in metric_config (active_indicator = "N")
+    When the script processes metric_config
+    Then metric "<metric_template_name>" is not processed
+    And no sql_query is executed for metric "<metric_template_name>"
+    And no data is loaded into target_table or view for metric "<metric_template_name>"
+    And the execution status "SKIPPED" is logged in metric_audit_log_stg with start_time and end_time
+
+    Examples:
+      | metric_template_name | source_table                                         | primary_key | target_table                                         |
+      | metric_col_3        | agilisium_playground.purgo_playground.medical_inquiry_data | inquiry_id  | agilisium_playground.purgo_playground.mska           |
+
+  Scenario Outline: Error when sql_query is invalid
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_master for "<metric_template_name>" specifies an invalid sql_query "<sql_query>"
+    When the script attempts to execute sql_query "<sql_query>"
+    Then the execution fails with error message "SQL_EXECUTION_ERROR: <error_message>"
+    And the execution status "FAILED" is logged in metric_audit_log_stg with start_time, end_time, and error_message
+
+    Examples:
+      | metric_template_name | sql_query                                 | error_message                       |
+      | metric_col_4        | SELECT * FROM non_existent_table           | Table or view not found: non_existent_table |
+      | metric_col_5        | SELECT inquiry_id, FROM medical_inquiry_data | Syntax error near ','              |
+
+  Scenario Outline: Error when source_table or primary_key does not exist
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_config specifies source_table "<source_table>" or primary_key "<primary_key>" that does not exist
+    When the script attempts to join results with source_table "<source_table>" on primary_key "<primary_key>"
+    Then the execution fails with error message "JOIN_ERROR: <error_message>"
+    And the execution status "FAILED" is logged in metric_audit_log_stg with start_time, end_time, and error_message
+
+    Examples:
+      | metric_template_name | source_table                                         | primary_key | error_message                       |
+      | metric_col_6        | agilisium_playground.purgo_playground.non_existent    | inquiry_id  | Table not found: non_existent       |
+      | metric_col_7        | agilisium_playground.purgo_playground.medical_inquiry_data | missing_pk  | Primary key column not found: missing_pk |
+
+  Scenario Outline: Error when target_table does not exist
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_config specifies target_table "<target_table>" that does not exist
+    When the script attempts to load results into target_table "<target_table>"
+    Then the execution fails with error message "TARGET_TABLE_ERROR: <error_message>"
+    And the execution status "FAILED" is logged in metric_audit_log_stg with start_time, end_time, and error_message
+
+    Examples:
+      | metric_template_name | target_table                                         | error_message                       |
+      | metric_col_8        | agilisium_playground.purgo_playground.non_existent    | Table not found: non_existent       |
+
+  Scenario Outline: Validate metric column data type
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_config.metric_data_type for "<metric_template_name>" is "<expected_data_type>"
+    When the script loads metric column "<metric_template_name>" into target_table "<target_table>"
+    Then the data type of metric column "<metric_template_name>" in target_table "<target_table>" is "<expected_data_type>"
+    And if the data type does not match, the execution fails with error message "DATA_TYPE_MISMATCH: Expected <expected_data_type> but found <actual_data_type>"
+    And the execution status "FAILED" is logged in metric_audit_log_stg with start_time, end_time, and error_message
+
+    Examples:
+      | metric_template_name | target_table                                         | expected_data_type | actual_data_type |
+      | metric_col_9        | agilisium_playground.purgo_playground.mska           | bigint            | bigint          |
+      | metric_col_10       | agilisium_playground.purgo_playground.mska           | double            | string          |
+
+  Scenario Outline: Validate metric column count in target table
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_minus_config for "<metric_id>" specifies no_of_metric_col "<no_of_metric_col>"
+    When the script loads metric columns into target_table "<target_table>"
+    Then the number of metric columns loaded in target_table "<target_table>" is "<no_of_metric_col>"
+    And the result is logged in metric_minus_validation_stg with result "PASS" if counts match, else "FAIL"
+
+    Examples:
+      | metric_id   | metric_template_name | target_table                                         | no_of_metric_col |
+      | metric_001  | metric_col_11        | agilisium_playground.purgo_playground.mska           | 1                |
+      | metric_002  | metric_col_12        | agilisium_playground.purgo_playground.mska           | 2                |
+
+  Scenario Outline: Validate row count between source and target tables
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_config specifies source_table "<source_table>" and target_table "<target_table>"
+    When the script loads metric column "<metric_template_name>" into target_table "<target_table>"
+    Then the number of rows in target_table "<target_table>" matches the number of rows in source_table "<source_table>" on primary_key "<primary_key>"
+    And the result is logged in metric_minus_validation_stg with result "PASS" if counts match, else "FAIL"
+
+    Examples:
+      | metric_template_name | source_table                                         | target_table                                         | primary_key |
+      | metric_col_13       | agilisium_playground.purgo_playground.medical_inquiry_data | agilisium_playground.purgo_playground.mska           | inquiry_id  |
+
+  Scenario Outline: Error when sql_query returns no results
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_master for "<metric_template_name>" specifies sql_query "<sql_query>" that returns no results
+    When the script executes sql_query "<sql_query>"
+    Then the execution fails with error message "NO_RESULTS: SQL query returned no results for metric <metric_template_name>"
+    And the execution status "FAILED" is logged in metric_audit_log_stg with start_time, end_time, and error_message
+
+    Examples:
+      | metric_template_name | sql_query                                 |
+      | metric_col_14       | SELECT inquiry_id FROM medical_inquiry_data WHERE 1=0 |
+
+  Scenario Outline: Error when metric_config and metric_master mapping is missing
+    Given metric_config.metric_template_name "<metric_template_name>" does not exist in metric_master
+    When the script processes metric_config
+    Then the execution fails with error message "MAPPING_ERROR: No matching metric_master entry for metric_template_name <metric_template_name>"
+    And the execution status "FAILED" is logged in metric_audit_log_stg with start_time, end_time, and error_message
+
+    Examples:
+      | metric_template_name |
+      | metric_col_15       |
+
+  Scenario: Process metrics in correct dependency order
+    Given multiple active metrics in metric_config with dependencies 1, 2, 3 in metric_master
+    When the script executes sql_query for each metric
+    Then metrics are processed in ascending order of dependency
+    And metric with dependency 1 is processed before dependency 2, and so on
+
+  Scenario: Log audit information for each metric execution
+    Given metric "<metric_template_name>" is processed
+    When the script starts execution
+    Then start_time is recorded in metric_audit_log_stg
+    And end_time is recorded after execution completes
+    And execution_status is set to "SUCCESS", "FAILED", or "SKIPPED"
+    And error_message is populated if execution_status is "FAILED"
+
+  Scenario Outline: Data-driven test for multiple metrics and tables
+    Given metric "<metric_template_name>" is active in metric_config (active_indicator = "Y")
+    And metric_config specifies source_table "<source_table>", primary_key "<primary_key>", and target_table "<target_table>"
+    And metric_master specifies sql_query "<sql_query>", dependency "<dependency>", and view_name "<view_name>"
+    When the script executes and loads metric column "<metric_template_name>"
+    Then the metric column is present in target_table "<target_table>" or view "<view_name>"
+    And audit log is updated with execution_status "SUCCESS"
+
+    Examples:
+      | metric_template_name | source_table                                         | primary_key | target_table                                         | sql_query                                 | dependency | view_name         |
+      | metric_col_16       | agilisium_playground.purgo_playground.medical_inquiry_data | inquiry_id  | agilisium_playground.purgo_playground.mska           | SELECT inquiry_id, SUM(amount) AS metric_col_16 FROM agilisium_playground.purgo_playground.medical_inquiry_data GROUP BY inquiry_id | 1         | NULL             |
+      | metric_col_17       | agilisium_playground.purgo_playground.medical_inquiry_data | inquiry_id  | agilisium_playground.purgo_playground.mska           | SELECT inquiry_id, MAX(score) AS metric_col_17 FROM agilisium_playground.purgo_playground.medical_inquiry_data GROUP BY inquiry_id | 2         | metric_col_17_vw  |
