@@ -1,142 +1,182 @@
 Feature: Customer 360 Raw Table Backup and Vacuum Operations
 
-  The system must efficiently back up the purgo_databricks.purgo_playground.customer_360_raw table as compressed parquet files partitioned by state, and perform a vacuum operation to retain only records from the last 30 days. All operations must be logged for audit and traceability.
+  This feature covers the backup of the purgo_databricks.purgo_playground.customer_360_raw table as compressed parquet files partitioned by state, and the vacuum operation to retain only records from the last 30 days.
 
   Background:
     Given the source table is purgo_databricks.purgo_playground.customer_360_raw
-    And the backup volume path is "/Volumes/customer_360_raw_backup"
-    And the backup parquet files must use "snappy" compression codec
-    And the partitioning column is "state"
-    And all columns from customer_360_raw must be included in the backup
-    And the vacuum operation must use "creation_date" as the date column for retention
-    And the backup operation is scheduled to run daily at 02:00 UTC
-    And the backup retention policy is 90 days
-    And access permissions for read/write to the volume are granted to the "data_engineer" group
-    And all backup and vacuum operations must be logged in purgo_playground.customer_360_raw_backup_log
-    And null or missing values must be preserved as-is in the backup
-    And the backup must include the full table before vacuuming
+    And the backup location is /Volumes/customer_360_raw_backup/
+    And the backup format is parquet with snappy compression
+    And the partition column is state
+    And all columns from the source table must be included in the backup
+    And the retention filter for vacuum uses the creation_date column
+    And the retention period is 30 days (720 hours)
+    And the current date is <current_date> (format: yyyy-MM-dd)
 
-  Scenario: Successful backup of customer_360_raw table to compressed parquet files
-    Given the customer_360_raw table contains 100,000 records
-    When the PySpark backup script is executed
-    Then all records are written to "/Volumes/customer_360_raw_backup" as parquet files
-    And parquet files are compressed using "snappy"
-    And parquet files are partitioned by "state"
-    And all columns are included in the backup
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message |
-      | success | backup         | 100000       | NULL          |
+  Scenario: Successful backup of customer_360_raw table to compressed parquet files partitioned by state
+    Given the customer_360_raw table contains records with valid data
+    When the PySpark script reads all records from purgo_databricks.purgo_playground.customer_360_raw
+    And writes the data as parquet files to /Volumes/customer_360_raw_backup/ partitioned by state with snappy compression
+    Then parquet files are created in /Volumes/customer_360_raw_backup/ with subfolders for each state value
+    And each parquet file contains all columns: id, name, email, phone, company, job_title, address, city, state, country, industry, account_manager, creation_date, last_interaction_date, purchase_history, notes, zip
+    And the data types and nullability are preserved
+    And no partial or corrupt files are present in the backup location
 
-  Scenario: Successful vacuum of customer_360_raw table retaining last 30 days
-    Given the customer_360_raw table contains records with creation_date ranging from "2024-04-01" to "2024-06-15"
-    When the vacuum operation is executed on "2024-06-15"
-    Then only records with creation_date >= "2024-05-16" are retained
-    And records with creation_date < "2024-05-16" are permanently deleted
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message |
-      | success | vacuum         | <remaining_count> | NULL      |
-
-  Scenario Outline: Backup operation with invalid volume path
-    Given the backup volume path is "<invalid_path>"
-    When the PySpark backup script is executed
-    Then the backup operation fails
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message                |
-      | failed  | backup         | 0            | "Invalid volume path: <invalid_path>" |
+  Scenario Outline: Error during backup due to invalid backup location
+    Given the backup location is "<invalid_path>"
+    When the PySpark script attempts to write parquet files to "<invalid_path>"
+    Then the script fails with error message "Backup location <invalid_path> does not exist or is not writable"
+    And no files are created in "<invalid_path>"
 
     Examples:
-      | invalid_path                  |
-      | "/Volumes/nonexistent_backup" |
-      | "/Volumes/customer_360_raw"   |
+      | invalid_path                      |
+      | /Volumes/non_existent_backup/     |
+      | /Volumes/customer_360_raw_backup/readonly/ |
 
-  Scenario Outline: Backup operation with missing write permissions
-    Given the user executing the backup does not have write permissions to "/Volumes/customer_360_raw_backup"
-    When the PySpark backup script is executed
-    Then the backup operation fails
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message                       |
-      | failed  | backup         | 0            | "Permission denied for backup volume" |
-
-  Scenario Outline: Vacuum operation with invalid date column
-    Given the vacuum operation is configured to use "<date_column>" as the retention column
-    When the vacuum operation is executed
-    Then the vacuum operation fails
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message                                 |
-      | failed  | vacuum         | 0            | "Invalid date column for vacuum: <date_column>" |
+  Scenario Outline: Error during backup due to missing partition column
+    Given the customer_360_raw table does not contain the partition column "<missing_partition_column>"
+    When the PySpark script attempts to partition by "<missing_partition_column>"
+    Then the script fails with error message "Partition column <missing_partition_column> not found in source table"
+    And no files are created in /Volumes/customer_360_raw_backup/
 
     Examples:
-      | date_column         |
-      | "last_interaction"  |
-      | "modified_date"     |
-      | "created"           |
+      | missing_partition_column |
+      | state                   |
+      | region                  |
 
-  Scenario: Backup operation with null values in columns
-    Given the customer_360_raw table contains records with null values in "email", "phone", and "notes"
-    When the PySpark backup script is executed
-    Then the backup parquet files preserve null values as-is
-    And no error is logged for null values
-
-  Scenario: Backup operation with missing required columns
-    Given the customer_360_raw table is missing the "state" column
-    When the PySpark backup script is executed
-    Then the backup operation fails
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message                |
-      | failed  | backup         | 0            | "Partition column 'state' not found in source table" |
-
-  Scenario: Backup operation with unsupported compression codec
-    Given the backup is configured to use "gzip" compression codec
-    When the PySpark backup script is executed
-    Then the backup operation fails
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message                |
-      | failed  | backup         | 0            | "Unsupported compression codec: gzip" |
-
-  Scenario Outline: Data-driven backup and vacuum operation
-    Given the customer_360_raw table contains <record_count> records
-    And the earliest creation_date is "<earliest_date>"
-    And the latest creation_date is "<latest_date>"
-    When the backup and vacuum operations are executed on "<operation_date>"
-    Then the backup parquet files contain <record_count> records
-    And the vacuumed table contains only records with creation_date >= "<retention_date>"
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message |
-      | success | backup         | <record_count> | NULL        |
-      | success | vacuum         | <retained_count> | NULL      |
+  Scenario Outline: Error during backup due to unsupported compression type
+    Given the compression type specified is "<compression_type>"
+    When the PySpark script attempts to write parquet files with "<compression_type>" compression
+    Then the script fails with error message "Compression type <compression_type> is not supported for parquet format"
+    And no files are created in /Volumes/customer_360_raw_backup/
 
     Examples:
-      | record_count | earliest_date | latest_date  | operation_date | retention_date | retained_count |
-      | 50000        | 2024-05-01    | 2024-06-15   | 2024-06-15     | 2024-05-16     | 30000          |
-      | 120000       | 2024-04-10    | 2024-06-15   | 2024-06-15     | 2024-05-16     | 80000          |
+      | compression_type |
+      | lz4             |
+      | zstd            |
+      | none            |
 
-  Scenario: Logging of backup and vacuum operations
-    Given the backup and vacuum operations are executed successfully
-    When the operations complete
-    Then a log entry is created in customer_360_raw_backup_log for each operation with
-      | timestamp           | status  | operation_type | record_count | error_message |
-      | "2024-06-15T02:00Z" | success | backup         | <count>      | NULL          |
-      | "2024-06-15T02:10Z" | success | vacuum         | <count>      | NULL          |
+  Scenario: Successful vacuum operation retaining only records from the last 30 days
+    Given the customer_360_raw table contains records with creation_date values ranging from past to present
+    When the PySpark script performs a vacuum operation on purgo_databricks.purgo_playground.customer_360_raw
+    And deletes all records where creation_date < date_sub(<current_date>, 30)
+    Then only records with creation_date >= date_sub(<current_date>, 30) remain in the table
+    And all records older than 30 days are physically removed from the table
+    And the operation does not affect the backup files in /Volumes/customer_360_raw_backup/
 
-  Scenario: Backup operation with audit requirements
-    Given the backup operation is executed
-    When the operation completes
-    Then the log entry in customer_360_raw_backup_log must include
-      | timestamp           | status  | operation_type | record_count | error_message |
-    And the log entry must be accessible to the compliance team
+  Scenario Outline: Error during vacuum due to missing creation_date column
+    Given the customer_360_raw table does not contain the column "<missing_date_column>"
+    When the PySpark script attempts to filter records using "<missing_date_column>"
+    Then the script fails with error message "Date column <missing_date_column> not found in source table"
+    And no records are deleted from the table
 
-  Scenario: Scheduled backup operation
-    Given the backup operation is scheduled to run daily at 02:00 UTC
-    When the scheduled time is reached
-    Then the backup operation is triggered automatically
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message |
-      | success | backup         | <count>      | NULL          |
+    Examples:
+      | missing_date_column      |
+      | creation_date            |
+      | last_interaction_date    |
 
-  Scenario: Retention policy enforcement for backup files
-    Given backup parquet files older than 90 days exist in "/Volumes/customer_360_raw_backup"
-    When the retention policy is enforced
-    Then backup files older than 90 days are deleted
-    And a log entry is created in customer_360_raw_backup_log with
-      | status  | operation_type | record_count | error_message |
-      | success | retention      | <deleted_count> | NULL        |
+  Scenario Outline: Error during vacuum due to invalid date format in creation_date
+    Given the customer_360_raw table contains records with creation_date in format "<invalid_date_format>"
+    When the PySpark script attempts to filter records for the last 30 days
+    Then the script fails with error message "Invalid date format '<invalid_date_format>' in creation_date column"
+    And no records are deleted from the table
+
+    Examples:
+      | invalid_date_format |
+      | MM/dd/yyyy          |
+      | dd-MM-yyyy          |
+      | 2024/06/01          |
+
+  Scenario: Data validation for backup - all columns and types are preserved
+    Given the backup parquet files are created in /Volumes/customer_360_raw_backup/
+    When the files are read back into a DataFrame
+    Then the schema matches the source table:
+      | column                | type    | nullable |
+      | id                    | bigint  | true     |
+      | name                  | string  | true     |
+      | email                 | string  | true     |
+      | phone                 | string  | true     |
+      | company               | string  | true     |
+      | job_title             | string  | true     |
+      | address               | string  | true     |
+      | city                  | string  | true     |
+      | state                 | string  | true     |
+      | country               | string  | true     |
+      | industry              | string  | true     |
+      | account_manager       | string  | true     |
+      | creation_date         | date    | true     |
+      | last_interaction_date | date    | true     |
+      | purchase_history      | string  | true     |
+      | notes                 | string  | true     |
+      | zip                   | string  | true     |
+    And the record count in backup matches the source table before vacuum
+
+  Scenario Outline: Data-driven backup and vacuum validation for multiple states
+    Given the customer_360_raw table contains records with state = "<state_value>" and creation_date = "<creation_date>"
+    When the backup and vacuum operations are performed
+    Then the backup parquet files are created in /Volumes/customer_360_raw_backup/state=<state_value>/
+    And records with creation_date >= date_sub(<current_date>, 30) remain in the source table
+    And records with creation_date < date_sub(<current_date>, 30) are deleted from the source table
+
+    Examples:
+      | state_value | creation_date  |
+      | CA          | 2024-06-01     |
+      | NY          | 2024-06-15     |
+      | TX          | 2024-05-15     |
+      | FL          | 2024-07-01     |
+
+  Scenario: Error during backup due to insufficient storage space
+    Given the backup location /Volumes/customer_360_raw_backup/ has less than required free space
+    When the PySpark script attempts to write parquet files
+    Then the script fails with error message "Insufficient storage space in /Volumes/customer_360_raw_backup/"
+    And no partial files are left in the backup location
+
+  Scenario: Error during vacuum due to lack of delete permissions
+    Given the user executing the vacuum operation does not have delete permissions on purgo_databricks.purgo_playground.customer_360_raw
+    When the PySpark script attempts to delete records older than 30 days
+    Then the script fails with error message "Permission denied: cannot delete records from purgo_databricks.purgo_playground.customer_360_raw"
+    And no records are deleted from the table
+
+  Scenario: Backup and vacuum operations are atomic and do not leave partial results
+    Given the backup and vacuum operations are initiated
+    When an unexpected interruption occurs during backup or vacuum
+    Then no partial parquet files are left in /Volumes/customer_360_raw_backup/
+    And no partial deletes are performed in purgo_databricks.purgo_playground.customer_360_raw
+    And the operations can be retried safely
+
+  Scenario: Backup does not alter data in the source table
+    Given the backup operation is performed on purgo_databricks.purgo_playground.customer_360_raw
+    When the backup completes successfully
+    Then the data in purgo_databricks.purgo_playground.customer_360_raw remains unchanged before vacuum
+
+  Scenario: Vacuum does not affect backup files
+    Given the backup files are present in /Volumes/customer_360_raw_backup/
+    When the vacuum operation is performed on purgo_databricks.purgo_playground.customer_360_raw
+    Then the backup files in /Volumes/customer_360_raw_backup/ are not modified or deleted
+
+  Scenario: Error during backup due to null values in partition column
+    Given the customer_360_raw table contains records with state = null
+    When the PySpark script attempts to partition by state
+    Then the script writes records with state = null to /Volumes/customer_360_raw_backup/state=null/
+    And no error is thrown
+    And all records are included in the backup
+
+  Scenario: Error during backup due to duplicate id values
+    Given the customer_360_raw table contains records with duplicate id values
+    When the PySpark script performs the backup
+    Then all records are backed up as-is
+    And no error is thrown
+    And the backup preserves duplicate id values
+
+  Scenario: Error during vacuum due to invalid retention period
+    Given the retention period specified is "<invalid_retention_period>"
+    When the PySpark script attempts to filter records for vacuum
+    Then the script fails with error message "Invalid retention period: <invalid_retention_period>"
+    And no records are deleted from the table
+
+    Examples:
+      | invalid_retention_period |
+      | -5                      |
+      | 0                       |
+      | thirty                  |
+      | 999999                  |
+
