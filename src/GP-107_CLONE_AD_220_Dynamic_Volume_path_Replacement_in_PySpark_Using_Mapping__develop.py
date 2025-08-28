@@ -1,16 +1,23 @@
 spark.catalog.setCurrentCatalog("purgo_databricks")
 
-# -----------------------------------------------------------------------------------
-# pyspark_script.py - Updated for Dynamic Volume Path Replacement using Mapping Sheet
-# -----------------------------------------------------------------------------------
-# This script processes biomarker, patient, and site data for clinical trial analytics.
-# Volume paths for CSV files are updated as per volume_mapping_sheet.xlsx.
-# All other logic and code structure remain unchanged.
-# -----------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------
+# PySpark Script for Clinical Trial Biomarker Data Processing
+# ----------------------------------------------------------------------------------------
+# Catalog: purgo_databricks
+# Schema: purgo_playground
+# Description:
+#   - Reads biomarker, patient demographic, and site details CSV files from updated volume paths
+#   - Cleans biomarker data by filling missing values with mean
+#   - Aggregates biomarker levels per patient
+#   - Joins with patient demographics and site details
+#   - Displays final processed DataFrame
+#   - Volume paths updated as per volume_mapping_sheet.xlsx
+# ----------------------------------------------------------------------------------------
 
+# from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
 from pyspark.sql.functions import col, avg, countDistinct  
 
-# Read CSV Files with updated volume paths from mapping sheet
+# Read CSV Files with updated volume paths as per mapping sheet
 biomarker_df = spark.read.option("header", True).csv("/Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv")
 patient_df = spark.read.option("header", True).csv("/Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv")
 site_df = spark.read.option("header", True).csv("/Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv")
@@ -45,3 +52,6 @@ final_df = patient_biomarker_df.join(biomarker_df.select("Patient_ID", "Site"), 
 
 # Show Final Processed Data
 display(final_df)
+# ----------------------------------------------------------------------------------------
+# End of script
+# ----------------------------------------------------------------------------------------
