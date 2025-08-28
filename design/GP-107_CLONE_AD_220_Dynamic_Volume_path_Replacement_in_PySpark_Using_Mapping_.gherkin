@@ -1,84 +1,95 @@
 Feature: Update volume paths in pyspark_script.py using volume_mapping_sheet.xlsx
 
-  The system must update only the volume paths in pyspark_script.py according to the mapping provided in volume_mapping_sheet.xlsx. All other code logic, structure, and variable names must remain unchanged.
+  The pyspark_script.py must be updated so that only the volume paths for the three CSV files are replaced with their corresponding new paths as specified in volume_mapping_sheet.xlsx. All other logic and code structure must remain unchanged.
 
   Background:
-    Given pyspark_script.py contains hardcoded volume paths for biomarker_readings.csv, patient_demographics.csv, and site_details.csv
-    And volume_mapping_sheet.xlsx provides a one-to-one mapping of old_volume_path to new_volume_path for each file
+    Given the file pyspark_script.py exists in the codebase
+    And the file volume_mapping_sheet.xlsx exists with the following mappings:
+      | old_volume_path                                                                 | new_volume_path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv      |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv     | /Volumes/agilisium_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv            |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv             | /Volumes/agilisium_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv                       |
 
-  Scenario Outline: Replace old volume paths with new volume paths in pyspark_script.py
-    Given the script contains the old volume path "<old_volume_path>"
-    When the script is updated using the mapping sheet
-    Then the script must contain the new volume path "<new_volume_path>"
-    And no other part of the script is changed
+  Scenario: Happy path - All volume paths are updated correctly
+    Given pyspark_script.py contains the following volume paths:
+      | path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv     |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv           |
+    When the update logic is executed to replace old volume paths with new volume paths using volume_mapping_sheet.xlsx
+    Then pyspark_script.py should contain the following updated volume paths:
+      | path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv      |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv      |
+    And no other code or logic in pyspark_script.py should be changed
+
+  Scenario Outline: Error scenario - Old volume path not found in script
+    Given pyspark_script.py does not contain the old volume path "<old_volume_path>"
+    When the update logic is executed to replace old volume paths with new volume paths using volume_mapping_sheet.xlsx
+    Then the update process should log an error message "Old volume path <old_volume_path> not found in pyspark_script.py"
+    And pyspark_script.py should remain unchanged
 
     Examples:
-      | old_volume_path                                                                 | new_volume_path                                                                                                 |
-      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv         | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv         |
-      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv        | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv |
-      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv                | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv         |
+      | old_volume_path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv               |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv             |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv                     |
 
-  Scenario: Happy path - All volume paths are present in mapping sheet and replaced successfully
-    Given pyspark_script.py contains all three old volume paths as per the mapping sheet
+  Scenario Outline: Error scenario - Mapping sheet missing required mapping
+    Given volume_mapping_sheet.xlsx does not contain a mapping for old volume path "<old_volume_path>"
+    When the update logic is executed to replace old volume paths with new volume paths using volume_mapping_sheet.xlsx
+    Then the update process should log an error message "Mapping for old volume path <old_volume_path> not found in volume_mapping_sheet.xlsx"
+    And pyspark_script.py should remain unchanged
+
+    Examples:
+      | old_volume_path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv               |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv             |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv                     |
+
+  Scenario Outline: Validation - Only volume paths are changed, other logic remains unchanged
+    Given pyspark_script.py contains the old volume path "<old_volume_path>" and other code logic
+    When the update logic is executed to replace old volume paths with new volume paths using volume_mapping_sheet.xlsx
+    Then only the volume path "<old_volume_path>" should be replaced with "<new_volume_path>"
+    And all other code, variable names, and logic in pyspark_script.py should remain unchanged
+
+    Examples:
+      | old_volume_path                                                                                   | new_volume_path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv               | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv      |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv             | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv                     | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv      |
+
+  Scenario Outline: Validation - Volume path format and value
+    Given the new volume path "<new_volume_path>" from volume_mapping_sheet.xlsx
     When the update logic is executed
-    Then all three old volume paths are replaced with their corresponding new volume paths
-    And the rest of the script remains unchanged
+    Then the new volume path in pyspark_script.py should match the format "/Volumes/<catalog>/<schema>/<subfolder>/<filename>.csv"
+    And the filename should be one of:
+      | 19_03_2025_Biomarker.csv           |
+      | 19_03_2025_Patient_Demographics.csv|
+      | 19_03_2025_Site_Data.csv           |
 
-  Scenario: Error - Old volume path not found in mapping sheet
-    Given pyspark_script.py contains a volume path "/Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/unknown_file.csv"
-    And volume_mapping_sheet.xlsx does not contain a mapping for "/Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/unknown_file.csv"
-    When the update logic is executed
-    Then the script must not change the path "/Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/unknown_file.csv"
-    And an error message "No mapping found for volume path: /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/unknown_file.csv" is logged
+    Examples:
+      | new_volume_path                                                                                   |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv      |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv |
+      | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv      |
 
-  Scenario: Error - Mapping sheet is missing or unreadable
+  Scenario: Error scenario - Mapping sheet is missing or unreadable
     Given volume_mapping_sheet.xlsx is missing or cannot be read
     When the update logic is executed
-    Then no changes are made to pyspark_script.py
-    And an error message "Volume mapping sheet not found or unreadable" is logged
+    Then the update process should log an error message "volume_mapping_sheet.xlsx is missing or unreadable"
+    And pyspark_script.py should remain unchanged
 
-  Scenario: Validation - Only volume paths are changed, no other code is modified
-    Given pyspark_script.py contains code logic, variable names, and comments
+  Scenario: Error scenario - New volume path is invalid format
+    Given volume_mapping_sheet.xlsx contains a new_volume_path with invalid format "invalid_path"
     When the update logic is executed
-    Then only the volume paths specified in the mapping sheet are changed
-    And all other code logic, variable names, and comments remain unchanged
+    Then the update process should log an error message "New volume path invalid_path is not a valid path format"
+    And pyspark_script.py should remain unchanged
 
-  Scenario Outline: Data-driven test for multiple volume path replacements
-    Given pyspark_script.py contains the old volume path "<old_volume_path>"
-    And volume_mapping_sheet.xlsx maps "<old_volume_path>" to "<new_volume_path>"
-    When the update logic is executed
-    Then the script contains "<new_volume_path>" instead of "<old_volume_path>"
-
-    Examples:
-      | old_volume_path                                                                 | new_volume_path                                                                                                 |
-      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv         | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv         |
-      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/patient_demographics.csv        | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Patient_Demographics.csv |
-      | /Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/site_details.csv                | /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Site_Data.csv         |
-
-  Scenario: Validation - Data format and path correctness
-    Given the new volume path is in the format "/Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/<file_name>.csv"
-    When the update logic is executed
-    Then the script must use the new path in the correct format for each file
-
-  Scenario: Error - Duplicate old volume paths in script
-    Given pyspark_script.py contains duplicate occurrences of "/Volumes/agilisium_playground/purgo_playground/de_dq/AD-218/biomarker_readings.csv"
-    And volume_mapping_sheet.xlsx maps it to "/Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/19_03_2025_Biomarker.csv"
-    When the update logic is executed
-    Then all occurrences of the old volume path are replaced with the new volume path
-
-  Scenario: Error - Invalid new volume path in mapping sheet
-    Given volume_mapping_sheet.xlsx contains a new_volume_path "/Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/"
-    When the update logic is executed
-    Then an error message "Invalid new volume path for mapping: /Volumes/agilisium_playground/purgo_playground/de_dq/clinical_trail/" is logged
-    And the old volume path is not replaced
-
-  Scenario: Validation - No extra whitespace or formatting changes
-    Given pyspark_script.py contains old volume paths with no extra whitespace
-    When the update logic is executed
-    Then the new volume paths are inserted without extra whitespace or formatting changes
-
-  Scenario: Validation - Logging of changes
-    Given the update logic is executed
-    When a volume path is replaced
-    Then a log entry "Replaced <old_volume_path> with <new_volume_path>" is created for each change
+  Scenario: Acceptance criteria - Final output code validation
+    Given the update logic has been executed successfully
+    When reviewing the final pyspark_script.py
+    Then the only changes present should be the updated volume paths as per volume_mapping_sheet.xlsx
+    And all other code, comments, and logic should remain exactly as before
 
