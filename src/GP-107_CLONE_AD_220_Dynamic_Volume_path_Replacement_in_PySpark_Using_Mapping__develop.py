@@ -1,15 +1,13 @@
 spark.catalog.setCurrentCatalog("purgo_databricks")
 
 # -----------------------------------------------------------------------------------
-# PySpark Script for Clinical Trial Data Processing in Databricks
+# pyspark_script.py - Updated for Dynamic Volume Path Replacement using Mapping Sheet
 # -----------------------------------------------------------------------------------
-# Catalog: purgo_databricks
-# Schema: purgo_playground
-# Volume paths updated as per volume_mapping_sheet.xlsx
-# Only volume paths are changed; all other logic remains unchanged
+# This script processes biomarker, patient, and site data for clinical trial analytics.
+# Volume paths for CSV files are updated as per volume_mapping_sheet.xlsx.
+# All other logic and code structure remain unchanged.
 # -----------------------------------------------------------------------------------
 
-# from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
 from pyspark.sql.functions import col, avg, countDistinct  
 
 # Read CSV Files with updated volume paths from mapping sheet
@@ -47,6 +45,3 @@ final_df = patient_biomarker_df.join(biomarker_df.select("Patient_ID", "Site"), 
 
 # Show Final Processed Data
 display(final_df)
-# -----------------------------------------------------------------------------------
-# End of Script
-# -----------------------------------------------------------------------------------
