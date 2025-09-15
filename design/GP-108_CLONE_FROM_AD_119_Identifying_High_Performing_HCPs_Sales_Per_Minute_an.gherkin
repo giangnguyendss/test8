@@ -1,0 +1,137 @@
+Feature: HCP Efficient Analysis for Sales per Minute and Conversion Rate
+
+  This feature analyzes HCP interactions to identify high-performing HCPs based on sales per minute and conversion rates, using data from the purgo_playground.hcp_efficient_analysis table.
+
+  Background:
+    Given the Unity Catalog is "purgo_databricks"
+    And the schema is "purgo_playground"
+    And the source table is "hcp_efficient_analysis"
+    And the table contains columns: HCP_ID (string), Revenue_Converted (string: "Yes"/"No"), Interaction_Type (string), Duration_Minutes (float), Sales_Amount (float), Follow_Up_Count (integer)
+
+  # Happy Path: Correct Data Aggregation and Flag Calculation
+  Scenario: Calculate Revenue_Converted_Flag and aggregate HCP performance metrics
+    Given the table contains valid data for all required columns
+    When the Revenue_Converted_Flag is set to 1 where Revenue_Converted equals "Yes"
+    And the Revenue_Converted_Flag is set to 0 where Revenue_Converted equals "No"
+    And the data is grouped by HCP_ID
+    Then for each HCP_ID, calculate:
+      | Metric                                 | Calculation                                                                                 |
+      |----------------------------------------|---------------------------------------------------------------------------------------------|
+      | Interaction_Count                      | count of Interaction_Type                                                                   |
+      | Total_Duration_Minutes                 | sum of Duration_Minutes                                                                     |
+      | Avg_Duration_Per_Interaction           | sum of Duration_Minutes divided by count of Interaction_Type                                 |
+      | Total_Follow_Up_Count                  | sum of Follow_Up_Count                                                                      |
+      | Total_Sales_Amount                     | sum of Sales_Amount                                                                         |
+      | Revenue_Converted_Interactions         | sum of Revenue_Converted_Flag                                                               |
+      | Revenue_Conversion_Rate_Percent        | (sum of Revenue_Converted_Flag / count of Interaction_Type) * 100                           |
+      | Sales_Per_Minute                       | sum of Sales_Amount / sum of Duration_Minutes                                               |
+    And the final output displays HCP_ID and all calculated metrics
+
+  # Error Scenario: Missing Required Columns
+  Scenario Outline: Handle missing required columns in source table
+    Given the table is missing the <Missing_Column> column
+    When the analysis is executed
+    Then an error is raised with message "Column <Missing_Column> not found in source table"
+
+    Examples:
+      | Missing_Column      |
+      | HCP_ID              |
+      | Revenue_Converted   |
+      | Interaction_Type    |
+      | Duration_Minutes    |
+      | Sales_Amount        |
+      | Follow_Up_Count     |
+
+  # Error Scenario: Invalid Revenue_Converted Values
+  Scenario Outline: Handle invalid values in Revenue_Converted column
+    Given the table contains a row with Revenue_Converted value "<Invalid_Value>"
+    When the Revenue_Converted_Flag is calculated
+    Then an error is raised with message "Invalid value '<Invalid_Value>' in Revenue_Converted column. Expected 'Yes' or 'No'."
+
+    Examples:
+      | Invalid_Value |
+      | Y             |
+      | N             |
+      | NULL          |
+      | 1             |
+      | 0             |
+      | Converted     |
+
+  # Error Scenario: Null or Negative Duration or Sales Amount
+  Scenario Outline: Handle null or negative values in Duration_Minutes or Sales_Amount
+    Given the table contains a row with <Column> value <Value>
+    When the aggregation is performed
+    Then an error is raised with message "<Column> contains invalid value <Value>. Must be non-null and non-negative."
+
+    Examples:
+      | Column           | Value  |
+      | Duration_Minutes | NULL   |
+      | Duration_Minutes | -5.0   |
+      | Sales_Amount     | NULL   |
+      | Sales_Amount     | -100.0 |
+
+  # Data-Driven Scenario: Validate Revenue_Converted_Flag Calculation
+  Scenario Outline: Validate Revenue_Converted_Flag assignment
+    Given a row with Revenue_Converted value "<Revenue_Converted>"
+    When the Revenue_Converted_Flag is calculated
+    Then the Revenue_Converted_Flag is <Expected_Flag>
+
+    Examples:
+      | Revenue_Converted | Expected_Flag |
+      | Yes               | 1             |
+      | No                | 0             |
+
+  # Data-Driven Scenario: Validate Revenue Conversion Rate Calculation
+  Scenario Outline: Validate Revenue Conversion Rate calculation per HCP
+    Given an HCP with <Total_Interactions> interactions and <Converted_Interactions> successful revenue conversions
+    When the Revenue Conversion Rate is calculated
+    Then the Revenue Conversion Rate is (<Converted_Interactions> / <Total_Interactions>) * 100
+
+    Examples:
+      | Total_Interactions | Converted_Interactions |
+      | 10                 | 5                     |
+      | 20                 | 10                    |
+      | 8                  | 0                     |
+      | 15                 | 15                    |
+
+  # Data-Driven Scenario: Validate Sales per Minute Calculation
+  Scenario Outline: Validate Sales per Minute calculation per HCP
+    Given an HCP with total sales amount <Total_Sales_Amount> and total duration <Total_Duration_Minutes>
+    When the Sales per Minute is calculated
+    Then the Sales per Minute is <Total_Sales_Amount> divided by <Total_Duration_Minutes>
+
+    Examples:
+      | Total_Sales_Amount | Total_Duration_Minutes |
+      | 1000.0             | 200.0                  |
+      | 500.0              | 50.0                   |
+      | 0.0                | 100.0                  |
+      | 250.0              | 0.0                    |
+
+  # Error Scenario: Division by Zero in Sales per Minute
+  Scenario: Handle division by zero in Sales per Minute calculation
+    Given an HCP with total duration of 0.0 minutes
+    When the Sales per Minute is calculated
+    Then an error is raised with message "Total_Duration_Minutes is zero for HCP_ID <HCP_ID>. Cannot calculate Sales per Minute."
+
+  # Error Scenario: Division by Zero in Revenue Conversion Rate
+  Scenario: Handle division by zero in Revenue Conversion Rate calculation
+    Given an HCP with zero interactions
+    When the Revenue Conversion Rate is calculated
+    Then an error is raised with message "Interaction_Count is zero for HCP_ID <HCP_ID>. Cannot calculate Revenue Conversion Rate."
+
+  # Happy Path: Output Format Validation
+  Scenario: Validate output format and column names
+    Given the analysis is completed successfully
+    When the final output is generated
+    Then the output contains columns:
+      | Column_Name                   | Data_Type   | Format/Description                                 |
+      |-------------------------------|-------------|----------------------------------------------------|
+      | HCP_ID                        | string      | Unique identifier for HCP                          |
+      | Interaction_Count             | integer     | Count of interactions                              |
+      | Total_Duration_Minutes        | float       | Sum of Duration_Minutes                            |
+      | Avg_Duration_Per_Interaction  | float       | Average duration per interaction                   |
+      | Total_Follow_Up_Count         | integer     | Sum of Follow_Up_Count                             |
+      | Total_Sales_Amount            | float       | Sum of Sales_Amount                                |
+      | Revenue_Converted_Interactions| integer     | Sum of Revenue_Converted_Flag                      |
+      | Revenue_Conversion_Rate_Percent| float      | Percentage of successful revenue conversions       |
+      | Sales_Per_Minute              | float       | Sales per minute                                   |
