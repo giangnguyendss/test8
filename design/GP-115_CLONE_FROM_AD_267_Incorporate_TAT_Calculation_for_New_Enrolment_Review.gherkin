@@ -1,0 +1,172 @@
+Feature: Calculate Total Time Elapsed (TAT) for New Enrollment Review in tat_report
+
+  Background:
+    Given Unity Catalog "purgo_databricks" and Schema "purgo_playground" are available
+    And pat_case table exists in purgo_playground schema
+    And sr_activity table exists in purgo_playground schema
+    And tat_report table will be created in purgo_playground schema, overwriting any existing table
+
+  # Happy Path: Valid Start and End Dates, End Date >= Start Date, No NULLs, Weekends excluded
+  Scenario Outline: Calculate total_time_elapsed for valid New Enrollment Review cases
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | "Patient Foundation" |
+      | sr_created_date | <sr_created_date> |
+    And one or more sr_activity records exist for case_id <case_id> with
+      | subject         | "Perform New Enrollment Review Activity" |
+      | status          | "Completed"                              |
+      | last_modified_date | <last_modified_date_1>                |
+      | last_modified_date | <last_modified_date_2>                |
+    When the minimum last_modified_date for the case_id is <expected_end_date>
+    And both sr_created_date and minimum last_modified_date are not NULL
+    And minimum last_modified_date >= sr_created_date
+    Then total_time_elapsed is calculated as the number of working days (excluding Saturdays and Sundays) between sr_created_date (date only) and minimum last_modified_date (date only)
+    And total_time_elapsed is an integer
+    And tat_report contains all columns from pat_case plus total_time_elapsed
+
+    Examples:
+      | case_id | sr_created_date | last_modified_date_1 | last_modified_date_2 | expected_end_date | expected_total_time_elapsed |
+      | 1001    | 2024-06-01      | 2024-06-05          | 2024-06-03           | 2024-06-03        | 1                          |
+      | 1002    | 2024-06-07      | 2024-06-10          | 2024-06-12           | 2024-06-10        | 1                          |
+      | 1003    | 2024-06-14      | 2024-06-17          | 2024-06-18           | 2024-06-17        | 1                          |
+
+  # Edge Case: End Date < Start Date
+  Scenario Outline: End Date is before Start Date
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | "Patient Foundation" |
+      | sr_created_date | <sr_created_date> |
+    And one sr_activity record exists for case_id <case_id> with
+      | subject         | "Perform New Enrollment Review Activity" |
+      | status          | "Completed"                              |
+      | last_modified_date | <last_modified_date>                  |
+    When minimum last_modified_date < sr_created_date
+    Then total_time_elapsed is NULL
+    And tat_report contains all columns from pat_case plus total_time_elapsed
+
+    Examples:
+      | case_id | sr_created_date | last_modified_date | expected_total_time_elapsed |
+      | 2001    | 2024-06-10      | 2024-06-08        | NULL                       |
+
+  # Edge Case: End Date = Start Date
+  Scenario Outline: End Date equals Start Date
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | "Patient Foundation" |
+      | sr_created_date | <sr_created_date> |
+    And one sr_activity record exists for case_id <case_id> with
+      | subject         | "Perform New Enrollment Review Activity" |
+      | status          | "Completed"                              |
+      | last_modified_date | <last_modified_date>                  |
+    When minimum last_modified_date = sr_created_date
+    Then total_time_elapsed is 0
+    And tat_report contains all columns from pat_case plus total_time_elapsed
+
+    Examples:
+      | case_id | sr_created_date | last_modified_date | expected_total_time_elapsed |
+      | 3001    | 2024-06-10      | 2024-06-10        | 0                          |
+
+  # Error Case: Start Date or End Date is NULL
+  Scenario Outline: Start Date or End Date is NULL
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | "Patient Foundation" |
+      | sr_created_date | <sr_created_date> |
+    And one sr_activity record exists for case_id <case_id> with
+      | subject         | "Perform New Enrollment Review Activity" |
+      | status          | "Completed"                              |
+      | last_modified_date | <last_modified_date>                  |
+    When sr_created_date is NULL or minimum last_modified_date is NULL
+    Then total_time_elapsed is NULL
+    And tat_report contains all columns from pat_case plus total_time_elapsed
+
+    Examples:
+      | case_id | sr_created_date | last_modified_date | expected_total_time_elapsed |
+      | 4001    | NULL            | 2024-06-10        | NULL                       |
+      | 4002    | 2024-06-10      | NULL              | NULL                       |
+
+  # Error Case: No matching sr_activity record for case_id
+  Scenario Outline: No matching sr_activity record for case_id
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | "Patient Foundation" |
+      | sr_created_date | <sr_created_date> |
+    And no sr_activity record exists for case_id <case_id> with
+      | subject         | "Perform New Enrollment Review Activity" |
+      | status          | "Completed"                              |
+    Then total_time_elapsed is NULL
+    And tat_report contains all columns from pat_case plus total_time_elapsed
+
+    Examples:
+      | case_id | sr_created_date | expected_total_time_elapsed |
+      | 5001    | 2024-06-10      | NULL                       |
+
+  # Error Case: pat_case.service_request_type is not "Patient Foundation"
+  Scenario Outline: pat_case record with non-matching service_request_type
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | <service_request_type> |
+      | sr_created_date | <sr_created_date> |
+    And one sr_activity record exists for case_id <case_id> with
+      | subject         | "Perform New Enrollment Review Activity" |
+      | status          | "Completed"                              |
+      | last_modified_date | <last_modified_date>                  |
+    When service_request_type is not "Patient Foundation"
+    Then tat_report does not include this pat_case record
+
+    Examples:
+      | case_id | service_request_type | sr_created_date | last_modified_date |
+      | 6001    | "Other Type"         | 2024-06-10      | 2024-06-12        |
+
+  # Error Case: sr_activity.subject or status does not match
+  Scenario Outline: sr_activity record with non-matching subject or status
+    Given a pat_case record with
+      | case_id         | <case_id>         |
+      | service_request_type | "Patient Foundation" |
+      | sr_created_date | <sr_created_date> |
+    And one sr_activity record exists for case_id <case_id> with
+      | subject         | <subject>         |
+      | status          | <status>          |
+      | last_modified_date | <last_modified_date>                  |
+    When subject is not "Perform New Enrollment Review Activity" or status is not "Completed"
+    Then tat_report does not include this pat_case record
+
+    Examples:
+      | case_id | subject                          | status      | sr_created_date | last_modified_date |
+      | 7001    | "Other Activity"                 | "Completed" | 2024-06-10      | 2024-06-12        |
+      | 7002    | "Perform New Enrollment Review Activity" | "In Progress" | 2024-06-10      | 2024-06-12        |
+
+  # Validation: total_time_elapsed is always integer or NULL
+  Scenario Outline: Validate total_time_elapsed data type
+    Given tat_report contains a record for case_id <case_id>
+    Then total_time_elapsed is either an integer or NULL
+
+    Examples:
+      | case_id | expected_total_time_elapsed |
+      | 8001    | 2                          |
+      | 8002    | NULL                       |
+
+  # Validation: Only working days are counted (weekends excluded)
+  Scenario Outline: Weekend adjustment in total_time_elapsed calculation
+    Given sr_created_date is <start_date> and minimum last_modified_date is <end_date>
+    When calculating total_time_elapsed
+    Then only weekdays (Monday to Friday) between start_date and end_date (inclusive) are counted
+    And Saturdays and Sundays are excluded
+
+    Examples:
+      | start_date | end_date   | expected_total_time_elapsed |
+      | 2024-06-07 | 2024-06-10 | 1                          | # 2024-06-08 (Sat), 2024-06-09 (Sun) excluded
+      | 2024-06-14 | 2024-06-17 | 1                          | # 2024-06-15 (Sat), 2024-06-16 (Sun) excluded
+
+  # Validation: tat_report includes all columns from pat_case plus total_time_elapsed
+  Scenario: tat_report schema validation
+    Given tat_report is created
+    Then tat_report contains all columns from pat_case
+    And tat_report contains total_time_elapsed column
+
+  # Validation: tat_report is overwritten on each run
+  Scenario: tat_report overwrite behavior
+    Given tat_report exists in purgo_playground schema
+    When the PySpark script is executed
+    Then tat_report is overwritten with new results
+
