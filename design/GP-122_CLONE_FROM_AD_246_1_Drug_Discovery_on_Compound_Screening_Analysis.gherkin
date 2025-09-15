@@ -1,132 +1,108 @@
-Feature: Compound Drug Analysis Aggregation and Potential Categorization
-
-  This feature performs compound screening analysis on the purgo_playground.compound_drug_analysis table, including filtering, aggregation, joining, and categorization of results based on overall_score.
+Feature: Compound Screening Analysis with Aggregation, Filtering, Joining, and Result Categorization
 
   Background:
-    Given the source table is "purgo_playground.compound_drug_analysis"
-    And the table contains columns: study_id, compound_id, mutation_id, therapeutic_area, drug_name, ic50, auc, efficacy, toxicity, potency, sample_size, mutation_frequency, mutation_severity, compound_concentration, cell_viability, growth_inhibition, result, approved_flag, validation_status, status, created_by, score1, score2, score3, score4, score5
-    And only rows where approved_flag = 1 and validation_status = "valid" are included in the analysis
-    And null values in ic50, auc, efficacy, score1, score2, score3, score4, score5 are excluded from calculations
-    And grouping and joining are performed on therapeutic_area
-    And overall_score is calculated as the average of non-null score1, score2, score3, score4, score5 for each row
-    And result categorization is as follows:
-      | overall_score range | potential_category   |
-      | 70 <= score <= 100 | High Potential      |
-      | 60 <= score < 70   | Moderate Potential  |
-      | score < 60         | Low Potential       |
-    And duplicate or missing therapeutic_area values are excluded from grouping and joining
-    And join type for Join Analysis is inner join on therapeutic_area
-    And the final output displays all columns from compound_drug_analysis plus aggregated columns and result analysis
+    Given the Unity Catalog is "purgo_databricks"
+    And the schema is "purgo_playground"
+    And the source table is "purgo_playground.compound_drug_analysis"
+    And the table contains columns: therapeutic_area (string), ic50 (float), auc (float), efficacy (float), sample_size (integer), approved_flag (string), validation_status (string), score1 (float), score2 (float), score3 (float), score4 (float), score5 (float)
 
-  Scenario: Happy Path - Aggregation and Categorization for Valid Approved Compounds
-    Given the table contains rows with approved_flag = 1 and validation_status = "valid"
-    And all required columns (ic50, auc, efficacy, score1, score2, score3, score4, score5, therapeutic_area) are non-null
-    When the data is grouped by therapeutic_area
-    Then calculate average_ic50 as the mean of ic50 per therapeutic_area
-    And calculate average_auc as the mean of auc per therapeutic_area
-    And calculate average_efficacy as the mean of efficacy per therapeutic_area
-    And calculate total_sample_size as the sum of sample_size per therapeutic_area
-    And calculate study_count as the count of distinct study_id per therapeutic_area
-    And join the filtered data with aggregated data on therapeutic_area using inner join
-    And for each row, calculate overall_score as the average of score1, score2, score3, score4, score5 (ignoring nulls)
-    And categorize each row as:
-      | overall_score >= 70 and <= 100 | High Potential      |
-      | overall_score >= 60 and < 70   | Moderate Potential  |
-      | overall_score < 60             | Low Potential       |
-    And display all columns from compound_drug_analysis plus average_ic50, average_auc, average_efficacy, total_sample_size, study_count, overall_score, potential_category
+  # Happy Path: Aggregation, Filtering, Joining, and Categorization
 
-  Scenario Outline: Error - Missing Required Values
-    Given a row with <missing_column> as null
-    When the row is processed for aggregation or overall_score calculation
-    Then exclude the row from all calculations and output
+  Scenario: Aggregate compound data by therapeutic_area and join with filtered results
+    Given the table "purgo_playground.compound_drug_analysis" contains valid data
+    When the data is grouped by "therapeutic_area" to calculate:
+      | Aggregation         | Column         | Calculation         |
+      | average            | ic50           | avg(ic50)           |
+      | average            | auc            | avg(auc)            |
+      | average            | efficacy       | avg(efficacy)       |
+      | sum                | sample_size    | sum(sample_size)    |
+      | count              | studies        | count(*)            |
+    And the data is filtered to include only rows where "approved_flag" = '1' and "validation_status" = 'valid'
+    And the filtered data is joined with the aggregated data on "therapeutic_area" using an inner join
+    And for each joined row, "overall_score" is computed as average of "score1", "score2", "score3", "score4", "score5"
+    And each row is categorized as:
+      | Category            | Range (inclusive)         |
+      | High Potential      | 70 <= overall_score <= 100|
+      | Moderate Potential  | 60 <= overall_score < 70  |
+      | Low Potential       | overall_score < 60        |
+    Then the final output displays all columns from the joined dataset, including "overall_score" and "Category"
 
-    Examples:
-      | missing_column |
-      | ic50          |
-      | auc           |
-      | efficacy      |
-      | score1        |
-      | score2        |
-      | score3        |
-      | score4        |
-      | score5        |
-      | therapeutic_area |
+  # Error Scenario: No rows after filtering
 
-  Scenario: Error - Invalid Approved Flag or Validation Status
-    Given a row with approved_flag != 1 or validation_status != "valid"
-    When the row is processed
-    Then exclude the row from all calculations and output
+  Scenario: No data after filtering by approved_flag and validation_status
+    Given the table "purgo_playground.compound_drug_analysis" contains data
+    When the data is filtered to include only rows where "approved_flag" = '1' and "validation_status" = 'valid'
+    And no rows match the filter criteria
+    Then the output is an empty result set
+    And an error message "No valid approved compounds found for analysis." is displayed
 
-  Scenario: Error - Duplicate or Missing Therapeutic Area
-    Given a row with therapeutic_area as null or duplicate
-    When the data is grouped or joined on therapeutic_area
-    Then exclude rows with null therapeutic_area from all calculations and output
-    And group only on unique therapeutic_area values
+  # Error Scenario: Invalid score values
 
-  Scenario Outline: Data Type Validation for Filtering
-    Given a row with approved_flag as <approved_flag_type>
-    And validation_status as <validation_status_type>
-    When filtering for approved_flag = 1 and validation_status = "valid"
-    Then include the row only if approved_flag is integer 1 and validation_status is string "valid"
-    And exclude the row otherwise
+  Scenario Outline: Invalid score values for overall_score calculation
+    Given a row with "score1" = <score1>, "score2" = <score2>, "score3" = <score3>, "score4" = <score4>, "score5" = <score5>
+    When "overall_score" is calculated as average of the five scores
+    Then if any score is null or not a number, the row is excluded from result analysis
+    And an error message "Invalid score values detected for compound in therapeutic_area <therapeutic_area>." is logged
 
     Examples:
-      | approved_flag_type | validation_status_type |
-      | integer            | string                |
-      | string             | string                |
-      | integer            | integer               |
-      | string             | integer               |
+      | score1 | score2 | score3 | score4 | score5 | therapeutic_area |
+      | 80     | 90     | null   | 85     | 88     | Oncology        |
+      | 75     | 'NaN'  | 70     | 65     | 60     | Cardiology      |
+      | null   | null   | null   | null   | null   | Neurology       |
 
-  Scenario: Join Analysis - Inner Join on Therapeutic Area
-    Given filtered compound_drug_analysis data
-    And aggregated data grouped by therapeutic_area
-    When performing join analysis
-    Then perform an inner join on therapeutic_area
-    And retain only rows with matching therapeutic_area in both datasets
+  # Data-driven Scenario: Result Categorization
 
-  Scenario: Final Output - Display All Columns and Result Analysis
-    Given the joined and categorized data
-    When generating the final output
-    Then display all columns from compound_drug_analysis
-    And display aggregated columns: average_ic50, average_auc, average_efficacy, total_sample_size, study_count
-    And display result analysis columns: overall_score, potential_category
-
-  Scenario Outline: Potential Category Assignment
-    Given a row with overall_score = <overall_score>
-    When categorizing potential
-    Then assign potential_category as <potential_category>
+  Scenario Outline: Categorize compounds based on overall_score
+    Given a row with "overall_score" = <overall_score>
+    When the result category is determined
+    Then the category is <category>
 
     Examples:
-      | overall_score | potential_category   |
-      | 85            | High Potential      |
-      | 70            | High Potential      |
-      | 69.9          | Moderate Potential  |
-      | 60            | Moderate Potential  |
-      | 59.9          | Low Potential       |
-      | 0             | Low Potential       |
+      | overall_score | category           |
+      | 95            | High Potential     |
+      | 70            | High Potential     |
+      | 69.99         | Moderate Potential |
+      | 60            | Moderate Potential |
+      | 59.99         | Low Potential      |
+      | 0             | Low Potential      |
 
-  Scenario: Error - No Matching Therapeutic Area in Join
-    Given a row in filtered data with therapeutic_area not present in aggregated data
-    When performing inner join
-    Then exclude the row from the final output
+  # Validation Rules
 
-  Scenario: Error - All Scores Null for a Row
-    Given a row where all score1, score2, score3, score4, score5 are null
-    When calculating overall_score
-    Then exclude the row from categorization and output
+  Scenario: Validation rules for input data
+    Given the table "purgo_playground.compound_drug_analysis" is read
+    Then the following validation rules are applied:
+      | Column           | Rule                                      | Error Message                                      |
+      | approved_flag    | Must be '1' to be included                | "Row excluded: approved_flag is not '1'."          |
+      | validation_status| Must be 'valid' to be included            | "Row excluded: validation_status is not 'valid'."  |
+      | score1-5         | Must be numeric and not null               | "Row excluded: score value is invalid."            |
+      | ic50, auc, efficacy | Must be numeric and not null           | "Row excluded: aggregation value is invalid."      |
+      | sample_size      | Must be integer and not null               | "Row excluded: sample_size is invalid."            |
 
-  Scenario: Error - Aggregation Level Ambiguity
-    Given ambiguity in whether to aggregate at study, compound, or therapeutic_area level
-    When performing aggregation
-    Then aggregate only at therapeutic_area level as per requirements
+  # Join Analysis
 
-  Scenario: Error - Output Destination Not Specified
-    Given the output destination is not specified
-    When generating the final output
-    Then display the results in the notebook and do not write to a new table
+  Scenario: Join filtered data with aggregated data on therapeutic_area
+    Given filtered data and aggregated data are available
+    When the join is performed on "therapeutic_area"
+    Then only rows with matching "therapeutic_area" in both datasets are included in the output
 
-  Scenario: Error - Use of Other Tables
-    Given only compound_drug_analysis is specified for analysis
-    When performing the analysis
-    Then do not use other tables for enrichment or mapping
+  # Final Output Format
 
+  Scenario: Final output columns and format
+    Given the analysis is complete
+    Then the output includes the following columns:
+      | Column                | Format         |
+      | therapeutic_area      | string         |
+      | ic50                  | float (avg)    |
+      | auc                   | float (avg)    |
+      | efficacy              | float (avg)    |
+      | sample_size           | integer (sum)  |
+      | studies               | integer (count)|
+      | approved_flag         | string         |
+      | validation_status     | string         |
+      | score1                | float          |
+      | score2                | float          |
+      | score3                | float          |
+      | score4                | float          |
+      | score5                | float          |
+      | overall_score         | float          |
+      | category              | string         |
