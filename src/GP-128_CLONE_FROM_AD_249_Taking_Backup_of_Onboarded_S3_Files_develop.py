@@ -1,268 +1,241 @@
 %pip install boto3
+%pip install botocore
 
-# ---------------------------------------------------------------------------
-# Databricks PySpark Script: Automate Migration of Eligible Files from Purgo S3 Landing Folder to Archive Folder
-# ---------------------------------------------------------------------------
-# - Uses Unity Catalog: purgo_databricks, Schema: purgo_playground
-# - Source of truth: purgo_playground.s3_file_process_log
-# - Only files with file_status = 'SUCCESS' are migrated
-# - S3 paths and file names are dynamically read from the log table
-# - AWS credentials are securely fetched from Databricks secrets (scope: aws_keys)
-# - All file operations are wrapped in try-except blocks for robust error handling
-# - S3 path format, file type, and permissions are validated before migration
-# - Archive path is created if missing
-# - Migration status is updated in the log table to 'ARCHIVED' with current timestamp
-# - Handles duplicate log entries, missing files, permission errors, and unsupported file types
-# - Supports migration scope by date range (optional)
-# - All code follows Databricks security and performance best practices
-# ---------------------------------------------------------------------------
-# Imports
-# ---------------------------------------------------------------------------
+# ============================================================
+# Databricks PySpark Script: S3 File Migration from Landing to Archive
+# ============================================================
+# Automates migration of eligible files from Purgo S3 landing folder to archive folder.
+# - References Unity Catalog table: purgo_databricks.purgo_playground.s3_file_process_log
+# - Moves only files with file_status = 'SUCCESS'
+# - Dynamically reads s3_landing_path and s3_archive_path for each file
+# - Uses Databricks secrets "access_key" and "secret_key" from scope "aws_keys" for S3 access
+# - Handles error scenarios: missing files, permission issues, duplicate files in archive, invalid S3 path, NULLs, invalid file_status, identical source/target paths
+# - Logs all errors and actions
+# - Follows Databricks and PySpark best practices
+# ============================================================
+
 # from pyspark.sql import SparkSession  # SparkSession is already available in Databricks
-from pyspark.sql.functions import col, lit, when, current_timestamp, regexp_extract, desc  
-from pyspark.sql.types import StringType, TimestampType, StructType, StructField  
+
+# -- Required imports
+from pyspark.sql.functions import col, lit, when, expr, length  
+from pyspark.sql.types import StringType, TimestampType  
 import re  
-from datetime import datetime  
+import sys  
 
-# ---------------------------------------------------------------------------
-# Setup: Set Unity Catalog and Database
-# ---------------------------------------------------------------------------
-spark.catalog.setCurrentCatalog("purgo_databricks")
-spark.catalog.setCurrentDatabase("purgo_playground")
+# -- boto3 for S3 operations
+import boto3  
+from botocore.exceptions import ClientError  
 
-# ---------------------------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------------------------
+# -- Databricks utilities for secrets
+# dbutils is available in Databricks
+
+# ============================================================
+# Setup: AWS Credentials from Databricks Secret Scope
+# ============================================================
 
 def get_aws_credentials():
-    # Fetch AWS credentials from Databricks secrets
+    # -- Retrieve AWS credentials from Databricks secret scope
     try:
         access_key = dbutils.secrets.get(scope="aws_keys", key="access_key")
         secret_key = dbutils.secrets.get(scope="aws_keys", key="secret_key")
+        if not access_key or not secret_key:
+            raise Exception("Invalid or missing AWS credentials in Databricks secret scope aws_keys")
         return access_key, secret_key
     except Exception as e:
-        print("ERROR: AWS credentials not found in Databricks secret scope: aws_keys")
+        log_error(f"Invalid or missing AWS credentials in Databricks secret scope aws_keys: {str(e)}")
         return None, None
 
-def is_valid_s3_path(path):
-    # Validate S3 path format: s3://<bucket>/<folder>/<subfolder>
-    pattern = r"^s3://[a-zA-Z0-9\-\.]+/.+"
-    return bool(re.match(pattern, path)) if path else False
+def log_error(msg):
+    # -- Log error to stdout (can be replaced with Databricks logging)
+    print(f"[ERROR] {msg}", file=sys.stderr)
 
-def is_supported_file_type(file_name):
-    # Only allow .csv, .txt, .parquet
-    return bool(re.match(r".*\.(csv|txt|parquet)$", file_name.lower())) if file_name else False
+def log_info(msg):
+    # -- Log info to stdout
+    print(f"[INFO] {msg}")
+
+# ============================================================
+# S3 Utility Functions
+# ============================================================
 
 def parse_s3_path(s3_path):
-    # Parse S3 path into bucket and key
-    match = re.match(r"^s3://([a-zA-Z0-9\-\.]+)/(.*)$", s3_path)
+    # -- Parse S3 path into bucket and key prefix
+    match = re.match(r"^s3://([^/]+)/(.+)$", s3_path or "")
     if match:
-        bucket = match.group(1)
-        key = match.group(2)
-        return bucket, key
-    return None, None
+        return match.group(1), match.group(2)
+    else:
+        return None, None
 
-def s3_file_exists(s3_path, file_name, s3_client):
-    # Check if file exists in S3 landing path
-    bucket, key_prefix = parse_s3_path(s3_path)
-    if not bucket or not key_prefix or not file_name:
+def s3_file_exists(s3_client, s3_path, file_name):
+    # -- Check if file exists in S3 path
+    bucket, prefix = parse_s3_path(s3_path)
+    if not bucket or not prefix or not file_name:
         return False
-    key = f"{key_prefix}/{file_name}"
     try:
-        s3_client.head_object(Bucket=bucket, Key=key)
-        return True
+        response = s3_client.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}/{file_name}")
+        for obj in response.get("Contents", []):
+            if obj["Key"].endswith(file_name):
+                return True
+        return False
     except Exception:
         return False
 
-def s3_archive_path_exists(s3_archive_path, s3_client):
-    # Check if archive path exists (by listing objects with prefix)
-    bucket, key_prefix = parse_s3_path(s3_archive_path)
-    if not bucket or not key_prefix:
-        return False
+def move_s3_file(s3_client, source_path, target_path, file_name):
+    # -- Move file from source to target S3 path
+    src_bucket, src_prefix = parse_s3_path(source_path)
+    tgt_bucket, tgt_prefix = parse_s3_path(target_path)
+    if not src_bucket or not src_prefix or not tgt_bucket or not tgt_prefix or not file_name:
+        return False, "Invalid S3 path format"
+    src_key = f"{src_prefix}/{file_name}"
+    tgt_key = f"{tgt_prefix}/{file_name}"
     try:
-        resp = s3_client.list_objects_v2(Bucket=bucket, Prefix=key_prefix)
-        return 'Contents' in resp
-    except Exception:
-        return False
-
-def create_s3_archive_path(s3_archive_path, s3_client):
-    # S3 is flat, but we can create a zero-byte object as folder marker if needed
-    bucket, key_prefix = parse_s3_path(s3_archive_path)
-    if bucket and key_prefix:
-        try:
-            s3_client.put_object(Bucket=bucket, Key=f"{key_prefix}/", Body=b'')
-            print(f"INFO: Created archive path: {s3_archive_path}")
-        except Exception as e:
-            print(f"ERROR: Failed to create archive path {s3_archive_path}: {str(e)}")
-
-def move_s3_file(s3_landing_path, s3_archive_path, file_name, s3_client):
-    # Move file from landing to archive (copy then delete)
-    bucket_src, key_prefix_src = parse_s3_path(s3_landing_path)
-    bucket_dst, key_prefix_dst = parse_s3_path(s3_archive_path)
-    if not bucket_src or not key_prefix_src or not bucket_dst or not key_prefix_dst or not file_name:
-        print(f"ERROR: Invalid S3 path or file name for file: {file_name}")
-        return False, "InvalidPath"
-    key_src = f"{key_prefix_src}/{file_name}"
-    key_dst = f"{key_prefix_dst}/{file_name}"
-    try:
-        # Copy object
-        s3_client.copy_object(
-            Bucket=bucket_dst,
-            Key=key_dst,
-            CopySource={'Bucket': bucket_src, 'Key': key_src}
-        )
-        # Delete source object
-        s3_client.delete_object(Bucket=bucket_src, Key=key_src)
-        print(f"INFO: Moved file {file_name} from {s3_landing_path} to {s3_archive_path}")
-        return True, "Success"
-    except s3_client.exceptions.NoSuchKey:
-        print(f"ERROR: File not found in landing path: {s3_landing_path}/{file_name}")
-        return False, "FileNotFound"
-    except s3_client.exceptions.ClientError as e:
-        if e.response['Error']['Code'] == 'AccessDenied':
-            print(f"ERROR: Permission denied for S3 operation on: {s3_landing_path}/{file_name}")
-            return False, "PermissionDenied"
-        else:
-            print(f"ERROR: S3 ClientError for file {file_name}: {str(e)}")
-            return False, "ClientError"
+        s3_client.copy_object(Bucket=tgt_bucket, CopySource={"Bucket": src_bucket, "Key": src_key}, Key=tgt_key)
+        s3_client.delete_object(Bucket=src_bucket, Key=src_key)
+        return True, None
+    except ClientError as e:
+        return False, str(e)
     except Exception as e:
-        print(f"ERROR: Error moving file {file_name}: {str(e)}")
-        return False, "Error"
+        return False, str(e)
 
-def update_log_status(df, file_name, new_status):
-    # Update file_status and file_processed_date for file_name
-    return df.withColumn(
-        "file_status",
-        when(col("file_name") == file_name, lit(new_status)).otherwise(col("file_status"))
-    ).withColumn(
-        "file_processed_date",
-        when(col("file_name") == file_name, current_timestamp()).otherwise(col("file_processed_date"))
-    )
+# ============================================================
+# CTE: Read and Validate s3_file_process_log Table
+# ============================================================
 
-# ---------------------------------------------------------------------------
-# AWS S3 Client Initialization
-# ---------------------------------------------------------------------------
-try:
-    access_key, secret_key = get_aws_credentials()
-    if not access_key or not secret_key:
-        raise Exception("AWS credentials not found in Databricks secret scope: aws_keys")
-    import boto3  
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key
-    )
-except Exception as e:
-    print(f"ERROR: {str(e)}")
-    s3_client = None
+# -- Set current catalog for Unity Catalog
+spark.catalog.setCurrentCatalog("purgo_databricks")
 
-# ---------------------------------------------------------------------------
-# Migration Scope: Optional Date Range Filtering
-# ---------------------------------------------------------------------------
-# Set migration date range (inclusive) if needed, else set to None
-migration_start_date = None  # e.g., "2024-06-10"
-migration_end_date = None    # e.g., "2024-06-11"
+# -- Define allowed file_status values
+ALLOWED_FILE_STATUS = ["SUCCESS", "FAILED", "IN_PROGRESS"]
 
-# ---------------------------------------------------------------------------
-# Read Eligible Files from Log Table (CTE)
-# ---------------------------------------------------------------------------
-# Define explicit schema for s3_file_process_log
-s3_file_process_log_schema = StructType([
-    StructField("file_name", StringType(), True),
-    StructField("s3_vendor_path", StringType(), True),
-    StructField("s3_landing_path", StringType(), True),
-    StructField("s3_archive_path", StringType(), True),
-    StructField("file_status", StringType(), True),
-    StructField("file_processed_date", TimestampType(), True)
-])
+# -- Read s3_file_process_log table from Unity Catalog
+s3_file_process_log_df = spark.table("purgo_playground.s3_file_process_log")
 
-# Read from Unity Catalog table
-s3_file_process_log_df = spark.read.table("purgo_playground.s3_file_process_log")
+# -- Validate schema: enforce column order and types
+expected_columns = [
+    ("file_id", StringType()),
+    ("file_name", StringType()),
+    ("file_status", StringType()),
+    ("s3_landing_path", StringType()),
+    ("s3_archive_path", StringType()),
+    ("processed_timestamp", TimestampType())
+]
+actual_schema = s3_file_process_log_df.schema
+if len(actual_schema) != len(expected_columns):
+    log_error("Column count mismatch in s3_file_process_log table")
+    sys.exit(1)
+for idx, (col_name, col_type) in enumerate(expected_columns):
+    if actual_schema[idx].name != col_name or type(actual_schema[idx].dataType) != type(col_type):
+        log_error(f"Schema mismatch at column {idx}: expected {col_name} {col_type}, got {actual_schema[idx].name} {actual_schema[idx].dataType}")
+        sys.exit(1)
 
-# CTE: Filter eligible files for migration
+# -- CTE: Filter eligible files and validate data
 eligible_files_cte = (
     s3_file_process_log_df
-    .filter(
-        (col("file_status") == "SUCCESS") &
-        col("file_name").isNotNull() &
-        col("s3_landing_path").isNotNull() &
-        col("s3_archive_path").isNotNull()
+    .select(
+        col("file_id").cast("string").alias("file_id"),
+        col("file_name").cast("string").alias("file_name"),
+        col("file_status").cast("string").alias("file_status"),
+        col("s3_landing_path").cast("string").alias("s3_landing_path"),
+        col("s3_archive_path").cast("string").alias("s3_archive_path"),
+        col("processed_timestamp").cast("timestamp").alias("processed_timestamp")
     )
-    .filter(
-        col("file_name").rlike(".*\\.(csv|txt|parquet)$")  # Supported file types
-    )
-    .filter(
-        col("s3_landing_path").rlike("^s3://[a-zA-Z0-9\\-\\.]+/.+") &  # Valid S3 path
-        col("s3_archive_path").rlike("^s3://[a-zA-Z0-9\\-\\.]+/.+")
-    )
+    .where(col("file_status") == "SUCCESS")
+    .where(col("file_id").isNotNull() & col("file_name").isNotNull() & col("s3_landing_path").isNotNull() & col("s3_archive_path").isNotNull())
+    .where(col("s3_landing_path") != col("s3_archive_path"))
+    .where(col("s3_landing_path").rlike("^s3://[^/]+/.+"))
+    .where(col("s3_archive_path").rlike("^s3://[^/]+/.+"))
 )
 
-if migration_start_date and migration_end_date:
-    eligible_files_cte = eligible_files_cte.filter(
-        (col("file_processed_date") >= lit(migration_start_date)) &
-        (col("file_processed_date") <= lit(migration_end_date + "T23:59:59"))
+# -- CTE: Invalid file_status values
+invalid_status_cte = (
+    s3_file_process_log_df
+    .select("file_id", "file_name", "file_status")
+    .where(~col("file_status").isin(ALLOWED_FILE_STATUS))
+)
+for row in invalid_status_cte.collect():
+    log_error(f"Invalid file_status '{row.file_status}' for file {row.file_name}")
+
+# -- CTE: Invalid S3 path format
+invalid_s3_path_cte = (
+    s3_file_process_log_df
+    .select("file_id", "file_name", "s3_landing_path", "s3_archive_path")
+    .where(~col("s3_landing_path").rlike("^s3://[^/]+/.+") | ~col("s3_archive_path").rlike("^s3://[^/]+/.+"))
+)
+for row in invalid_s3_path_cte.collect():
+    log_error(f"Invalid S3 path format for file {row.file_name}")
+
+# -- CTE: NULL handling
+null_handling_cte = (
+    s3_file_process_log_df
+    .select("file_id", "file_name", "s3_landing_path", "s3_archive_path")
+    .where(col("file_name").isNull() | col("s3_landing_path").isNull() | col("s3_archive_path").isNull())
+)
+for row in null_handling_cte.collect():
+    log_error(f"NULL value detected for file_id {row.file_id}")
+
+# -- CTE: Identical source and target S3 paths
+identical_path_cte = (
+    s3_file_process_log_df
+    .select("file_id", "file_name", "s3_landing_path", "s3_archive_path")
+    .where(col("s3_landing_path") == col("s3_archive_path"))
+)
+for row in identical_path_cte.collect():
+    log_error(f"Source and target S3 paths are identical for file {row.file_name}")
+
+# ============================================================
+# S3 File Migration Logic
+# ============================================================
+
+# -- Get AWS credentials
+access_key, secret_key = get_aws_credentials()
+if not access_key or not secret_key:
+    sys.exit(1)
+
+# -- Create S3 client
+try:
+    s3_client = boto3.client(
+        "s3",
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
     )
+except Exception as e:
+    log_error(f"Failed to create S3 client: {str(e)}")
+    sys.exit(1)
 
-# ---------------------------------------------------------------------------
-# Main Migration Loop
-# ---------------------------------------------------------------------------
-if s3_client is not None:
-    eligible_files = eligible_files_cte.orderBy(desc("file_processed_date")).collect()
-    processed_files = set()
-    for row in eligible_files:
-        file_name = row.file_name
-        s3_landing_path = row.s3_landing_path
-        s3_archive_path = row.s3_archive_path
+# -- Process eligible files
+for row in eligible_files_cte.collect():
+    file_id = row["file_id"]
+    file_name = row["file_name"]
+    s3_landing_path = row["s3_landing_path"]
+    s3_archive_path = row["s3_archive_path"]
 
-        # Handle duplicate entries: only process each file once
-        if file_name in processed_files:
-            print(f"INFO: Multiple log entries found for file: {file_name}. Only SUCCESS status processed.")
-            continue
-        processed_files.add(file_name)
+    # -- Validate S3 path format
+    src_bucket, src_prefix = parse_s3_path(s3_landing_path)
+    tgt_bucket, tgt_prefix = parse_s3_path(s3_archive_path)
+    if not src_bucket or not src_prefix or not tgt_bucket or not tgt_prefix:
+        log_error(f"Invalid S3 path format for file {file_name}")
+        continue
 
-        # Validate S3 path format
-        if not is_valid_s3_path(s3_landing_path) or not is_valid_s3_path(s3_archive_path):
-            print(f"ERROR: Invalid S3 path format in log table for file: {file_name}")
-            continue
+    # -- Check if file exists in landing folder
+    if not s3_file_exists(s3_client, s3_landing_path, file_name):
+        log_error(f"File {file_name} not found in {s3_landing_path}")
+        continue
 
-        # Validate file type
-        if not is_supported_file_type(file_name):
-            print(f"ERROR: Unsupported file type for file: {file_name}")
-            continue
+    # -- Check if file already exists in archive folder
+    if s3_file_exists(s3_client, s3_archive_path, file_name):
+        log_error(f"File {file_name} already exists in {s3_archive_path}")
+        continue
 
-        # Check file existence in landing path
-        if not s3_file_exists(s3_landing_path, file_name, s3_client):
-            print(f"ERROR: File not found in landing path: {s3_landing_path}/{file_name}")
-            continue
+    # -- Move file from landing to archive
+    moved, err = move_s3_file(s3_client, s3_landing_path, s3_archive_path, file_name)
+    if moved:
+        log_info(f"File {file_name} moved from {s3_landing_path} to {s3_archive_path}")
+    else:
+        if err and "AccessDenied" in err:
+            log_error(f"Insufficient S3 permissions to move file {file_name} from {s3_landing_path} to {s3_archive_path}")
+        else:
+            log_error(f"Failed to move file {file_name}: {err}")
 
-        # Check archive path existence, create if missing
-        if not s3_archive_path_exists(s3_archive_path, s3_client):
-            create_s3_archive_path(s3_archive_path, s3_client)
-
-        # Move file from landing to archive
-        moved, status = move_s3_file(s3_landing_path, s3_archive_path, file_name, s3_client)
-        if not moved:
-            if status == "PermissionDenied":
-                print(f"ERROR: Permission denied for S3 operation on: {s3_landing_path}/{file_name}")
-            elif status == "FileNotFound":
-                print(f"ERROR: File not found in landing path: {s3_landing_path}/{file_name}")
-            else:
-                print(f"ERROR: Failed to move file {file_name} due to error: {status}")
-            continue
-
-        # Audit: Update migration status in log table to 'ARCHIVED' and update processed date
-        # Note: DeltaDataSource does not support user-specified schema, so use DataFrame API
-        s3_file_process_log_df = update_log_status(s3_file_process_log_df, file_name, "ARCHIVED")
-
-else:
-    print("ERROR: AWS S3 client not initialized. Migration aborted.")
-
-# ---------------------------------------------------------------------------
-# Data Quality Check: Ensure column count matches target table before insert
-# ---------------------------------------------------------------------------
-assert len(s3_file_process_log_df.columns) == 6, "Column count must match target table schema"
-
-# ---------------------------------------------------------------------------
-# End of Script
-# ---------------------------------------------------------------------------
+# ============================================================
+# End of S3 File Migration Script
+# ============================================================
 # spark.stop()  # Do not stop Spark in Databricks
