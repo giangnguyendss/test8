@@ -1,0 +1,141 @@
+Feature: Calculate actual sales value by brand, country, territory, month, and year
+
+  The system must calculate the actual_value for each brand_name, country_code, and territory_id by summing sales_value from t3_itm_territory_sales and sales_net_price_local from t3_ttm_territory_sales, grouped by month and year. Only records where source_system_name from both tables exist in the control_table under source_system are included.
+
+  Background:
+    Given the following tables exist in the purgo_playground schema:
+      | Table Name                        |
+      | t3_itm_territory_sales            |
+      | t3_ttm_territory_sales            |
+      | control_table                     |
+    And the t3_itm_territory_sales table contains columns:
+      | Column Name         | Data Type   | Example Value      |
+      | country_code        | STRING      | 'US'               |
+      | brand_name          | STRING      | 'BrandA'           |
+      | territory_id        | STRING      | 'TERR001'          |
+      | sales_month         | STRING      | '2024-06'          |
+      | sales_value         | DECIMAL     | 1000.50            |
+      | source_system_name  | STRING      | 'SAP'              |
+    And the t3_ttm_territory_sales table contains columns:
+      | Column Name             | Data Type   | Example Value      |
+      | country_code            | STRING      | 'US'               |
+      | brand_name              | STRING      | 'BrandA'           |
+      | territory_id            | STRING      | 'TERR001'          |
+      | fiscal_date             | DATE        | '2024-06-15'       |
+      | sales_net_price_local   | DECIMAL     | 500.25             |
+      | source_system_name      | STRING      | 'SAP'              |
+    And the control_table contains columns:
+      | Column Name     | Data Type   | Example Value      |
+      | source_system   | STRING      | 'SAP'              |
+
+  Scenario: Calculate actual_value for valid records (happy path)
+    Given t3_itm_territory_sales contains a record with
+      | country_code        | brand_name | territory_id | sales_month | sales_value | source_system_name |
+      | 'US'               | 'BrandA'   | 'TERR001'    | '2024-06'   | 1000.50     | 'SAP'             |
+    And t3_ttm_territory_sales contains a record with
+      | country_code        | brand_name | territory_id | fiscal_date  | sales_net_price_local | source_system_name |
+      | 'US'               | 'BrandA'   | 'TERR001'    | '2024-06-15' | 500.25               | 'SAP'             |
+    And control_table contains
+      | source_system |
+      | 'SAP'         |
+    When the Databricks SQL query is executed to calculate actual_value
+    Then the result should contain
+      | brand_name | country_code | territory_id | month | year | actual_value |
+      | 'BrandA'   | 'US'         | 'TERR001'    | 6     | 2024 | 1500.75      |
+
+  Scenario Outline: Exclude records with missing source_system_name in control_table (error scenario)
+    Given t3_itm_territory_sales contains a record with
+      | country_code        | brand_name | territory_id | sales_month | sales_value | source_system_name |
+      | <country_code>      | <brand_name> | <territory_id> | <sales_month> | <sales_value> | <itm_source_system_name> |
+    And t3_ttm_territory_sales contains a record with
+      | country_code        | brand_name | territory_id | fiscal_date  | sales_net_price_local | source_system_name |
+      | <country_code>      | <brand_name> | <territory_id> | <fiscal_date> | <sales_net_price_local> | <ttm_source_system_name> |
+    And control_table contains
+      | source_system |
+      | <control_source_system> |
+    When the Databricks SQL query is executed to calculate actual_value
+    Then the result should not contain any record for <brand_name> and <territory_id> for <month> and <year>
+
+    Examples:
+      | country_code | brand_name | territory_id | sales_month | sales_value | itm_source_system_name | fiscal_date  | sales_net_price_local | ttm_source_system_name | control_source_system | month | year |
+      | 'US'         | 'BrandB'   | 'TERR002'    | '2024-06'   | 800.00      | 'ORACLE'              | '2024-06-10' | 400.00                | 'ORACLE'              | 'SAP'                | 6     | 2024 |
+      | 'FR'         | 'BrandC'   | 'TERR003'    | '2024-07'   | 1200.00     | 'SAP'                 | '2024-07-20' | 600.00                | 'DYNAMICS'            | 'SAP'                | 7     | 2024 |
+
+  Scenario Outline: Data-driven calculation for multiple brands and territories
+    Given t3_itm_territory_sales contains a record with
+      | country_code        | brand_name | territory_id | sales_month | sales_value | source_system_name |
+      | <country_code>      | <brand_name> | <territory_id> | <sales_month> | <sales_value> | <itm_source_system_name> |
+    And t3_ttm_territory_sales contains a record with
+      | country_code        | brand_name | territory_id | fiscal_date  | sales_net_price_local | source_system_name |
+      | <country_code>      | <brand_name> | <territory_id> | <fiscal_date> | <sales_net_price_local> | <ttm_source_system_name> |
+    And control_table contains
+      | source_system |
+      | <itm_source_system_name> |
+      | <ttm_source_system_name> |
+    When the Databricks SQL query is executed to calculate actual_value
+    Then the result should contain
+      | brand_name | country_code | territory_id | month | year | actual_value |
+      | <brand_name> | <country_code> | <territory_id> | <month> | <year> | <expected_actual_value> |
+
+    Examples:
+      | country_code | brand_name | territory_id | sales_month | sales_value | itm_source_system_name | fiscal_date  | sales_net_price_local | ttm_source_system_name | month | year | expected_actual_value |
+      | 'US'         | 'BrandA'   | 'TERR001'    | '2024-06'   | 1000.50     | 'SAP'                 | '2024-06-15' | 500.25                | 'SAP'                 | 6     | 2024 | 1500.75              |
+      | 'DE'         | 'BrandD'   | 'TERR004'    | '2024-05'   | 2000.00     | 'SAP'                 | '2024-05-20' | 1000.00               | 'SAP'                 | 5     | 2024 | 3000.00              |
+
+  Scenario: Validation of month and year extraction from sales_month and fiscal_date
+    Given t3_itm_territory_sales contains a record with sales_month in 'YYYY-MM' format
+      | sales_month |
+      | '2024-06'   |
+    And t3_ttm_territory_sales contains a record with fiscal_date in 'YYYY-MM-DD' format
+      | fiscal_date |
+      | '2024-06-15'|
+    When the Databricks SQL query extracts month and year
+    Then the extracted month should be 6 and year should be 2024
+
+  Scenario Outline: Error scenario for invalid date formats
+    Given t3_itm_territory_sales contains a record with
+      | sales_month |
+      | <invalid_sales_month> |
+    And t3_ttm_territory_sales contains a record with
+      | fiscal_date |
+      | <invalid_fiscal_date> |
+    When the Databricks SQL query is executed
+    Then an error should be raised with message "<expected_error_message>"
+
+    Examples:
+      | invalid_sales_month | invalid_fiscal_date | expected_error_message                                 |
+      | '202406'           | '2024/06/15'        | "Invalid date format for sales_month or fiscal_date"    |
+      | 'June-2024'        | '15-06-2024'        | "Invalid date format for sales_month or fiscal_date"    |
+
+  Scenario: Exclude records with NULL source_system_name in either table
+    Given t3_itm_territory_sales contains a record with source_system_name as NULL
+    And t3_ttm_territory_sales contains a valid record
+    When the Databricks SQL query is executed
+    Then the result should not contain any record for the corresponding brand_name, country_code, territory_id, month, and year
+
+  Scenario: Exclude records where brand/country/territory/month/year exists in only one table
+    Given t3_itm_territory_sales contains a record for brand_name 'BrandE', country_code 'US', territory_id 'TERR005', sales_month '2024-08'
+    And t3_ttm_territory_sales does not contain a matching record for brand_name 'BrandE', country_code 'US', territory_id 'TERR005', fiscal_date in August 2024
+    When the Databricks SQL query is executed
+    Then the result should not contain any record for brand_name 'BrandE', country_code 'US', territory_id 'TERR005', month 8, year 2024
+
+  Scenario: Validation rule for actual_value calculation
+    Given t3_itm_territory_sales.sales_value is DECIMAL and t3_ttm_territory_sales.sales_net_price_local is DECIMAL
+    When the Databricks SQL query sums these values for matching records
+    Then actual_value should be calculated as sales_value + sales_net_price_local with precision up to two decimal places
+
+  Scenario: Error scenario for duplicate records in sales tables
+    Given t3_itm_territory_sales contains duplicate records for brand_name 'BrandF', country_code 'US', territory_id 'TERR006', sales_month '2024-09'
+    And t3_ttm_territory_sales contains duplicate records for the same key
+    When the Databricks SQL query is executed
+    Then actual_value should be the sum of all matching sales_value and sales_net_price_local for the key combination
+
+  Scenario: Output columns validation
+    Given the Databricks SQL query is executed
+    Then the output should contain only the following columns:
+      | brand_name |
+      | country_code |
+      | territory_id |
+      | month |
+      | year |
+      | actual_value |
