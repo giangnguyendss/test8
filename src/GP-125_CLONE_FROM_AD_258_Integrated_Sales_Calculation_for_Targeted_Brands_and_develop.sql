@@ -1,152 +1,87 @@
-/*
-  Databricks SQL Script: Integrated Sales Aggregation by Brand, Product, Market, Competitor Flag, Channel, and Transaction Time
-
-  Catalog: purgo_databricks
-  Schema: purgo_playground
-
-  Requirements:
-    - Aggregate SUM of integrated_units, integrated_normalized_units, integrated_dollars
-    - Group by brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, transaction_timestamp
-    - For brands 'kanjinti', 'mvasi', 'riabni' with br_gpo_flag containing 'KAISER' (case-insensitive), treat sales as zero
-    - Only include rows where transaction_timestamp is within 36 months prior to cdl_effective_date (inclusive)
-    - Only include markets: 'trastuzumab-anns', 'bevacizumab-awwb', 'rituximab market'
-    - Exclude rows with NULL or invalid aggregation keys or cdl_effective_date
-    - Data type validation and conversion for aggregation columns
-    - Error logging for invalid cdl_effective_date and missing aggregation keys
-*/
-
-/* Use correct catalog and schema */
 USE CATALOG purgo_databricks;
 
-/* 
-  CTE: error_log
-  Logs rows with invalid cdl_effective_date or missing aggregation keys
-*/
-WITH error_log AS (
-  SELECT
-    brand_normalized_name,
-    normalized_name,
-    market_normalized_name,
-    competitor_flag,
-    channel_name,
-    transaction_timestamp,
-    integrated_units,
-    integrated_normalized_units,
-    integrated_dollars,
-    br_gpo_flag,
-    cdl_effective_date,
-    CASE
-      WHEN cdl_effective_date IS NULL THEN "Invalid cdl_effective_date"
-      WHEN brand_normalized_name IS NULL OR normalized_name IS NULL OR market_normalized_name IS NULL OR competitor_flag IS NULL OR channel_name IS NULL OR transaction_timestamp IS NULL THEN "Missing aggregation key"
-      ELSE NULL
-    END AS error_message
-  FROM purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
-  WHERE
-    cdl_effective_date IS NULL
-    OR brand_normalized_name IS NULL
-    OR normalized_name IS NULL
-    OR market_normalized_name IS NULL
-    OR competitor_flag IS NULL
-    OR channel_name IS NULL
-    OR transaction_timestamp IS NULL
-),
-
 /*
-  CTE: valid_sales
-  Filters and transforms valid rows for aggregation
+  Integrated Sales Aggregation Script
+  Catalog: purgo_databricks
+  Schema: purgo_playground
+  Source Table: bai_sales_agg_obu_customer_datapack_weekly
+
+  Business Logic:
+    - Aggregate sales for each combination of brand_name, product_name, market_name, competitor_flag, channel, transaction_time
+    - Sum integrated_units, integrated_normalized_units, integrated_dollars
+    - If brand_name is "kanjinti", "mvasi", or "riabni" (case-sensitive) AND gpo_flag contains "KAISER" (case-insensitive), set sales values to zero
+    - Only include rows where transaction_time is within 36 months prior to and including cdl_effective_date
+    - Only include market_name in ("trastuzumab-anns", "bevacizumab-awwb", "rituximab market")
+    - Exclude rows with NULL in any required field
+    - Output columns in required order
 */
-valid_sales AS (
+
+/*------------------*/
+/* Aggregation Query*/
+/*------------------*/
+
+WITH filtered_sales AS (
   SELECT
-    brand_normalized_name,
-    normalized_name,
-    market_normalized_name,
-    competitor_flag,
-    channel_name,
-    transaction_timestamp,
-    /* Zero out sales for specified brands with KAISER in GPO flag */
-    CAST(
-      CASE
-        WHEN brand_normalized_name IN ("kanjinti","mvasi","riabni")
-          AND br_gpo_flag IS NOT NULL
-          AND LOWER(br_gpo_flag) LIKE "%kaiser%"
-        THEN 0
-        ELSE integrated_units
-      END AS INT
-    ) AS integrated_units,
-    CAST(
-      CASE
-        WHEN brand_normalized_name IN ("kanjinti","mvasi","riabni")
-          AND br_gpo_flag IS NOT NULL
-          AND LOWER(br_gpo_flag) LIKE "%kaiser%"
-        THEN 0
-        ELSE integrated_normalized_units
-      END AS INT
-    ) AS integrated_normalized_units,
-    CAST(
-      CASE
-        WHEN brand_normalized_name IN ("kanjinti","mvasi","riabni")
-          AND br_gpo_flag IS NOT NULL
-          AND LOWER(br_gpo_flag) LIKE "%kaiser%"
-        THEN 0.0
-        ELSE integrated_dollars
-      END AS DOUBLE
-    ) AS integrated_dollars
-  FROM purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    brand_name AS brand_name,
+    product_name AS product_name,
+    market_name AS market_name,
+    competitor_flag AS competitor_flag,
+    channel AS channel,
+    transaction_time AS transaction_time,
+    gpo_flag AS gpo_flag,
+    cdl_effective_date AS cdl_effective_date,
+    integrated_units AS integrated_units,
+    integrated_normalized_units AS integrated_normalized_units,
+    integrated_dollars AS integrated_dollars
+  FROM purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
   WHERE
-    /* Only allowed markets */
-    market_normalized_name IN ("trastuzumab-anns","bevacizumab-awwb","rituximab market")
-    /* Only valid cdl_effective_date */
+    market_name IN ('trastuzumab-anns', 'bevacizumab-awwb', 'rituximab market')
+    AND transaction_time IS NOT NULL
     AND cdl_effective_date IS NOT NULL
-    /* Only valid aggregation keys */
-    AND brand_normalized_name IS NOT NULL
-    AND normalized_name IS NOT NULL
-    AND market_normalized_name IS NOT NULL
+    AND transaction_time >= ADD_MONTHS(cdl_effective_date, -36)
+    AND transaction_time <= cdl_effective_date
+    AND brand_name IS NOT NULL
+    AND product_name IS NOT NULL
     AND competitor_flag IS NOT NULL
-    AND channel_name IS NOT NULL
-    AND transaction_timestamp IS NOT NULL
-    /* Only transaction_timestamp within 36 months window (inclusive) */
-    AND transaction_timestamp >= DATE_ADD(cdl_effective_date, -1080)
-    AND transaction_timestamp <= cdl_effective_date
+    AND channel IS NOT NULL
+    AND gpo_flag IS NOT NULL
+    AND integrated_units IS NOT NULL
+    AND integrated_normalized_units IS NOT NULL
+    AND integrated_dollars IS NOT NULL
 )
-
-/*
-  Final Aggregation Query
-  - Aggregates sales by required keys
-  - Ensures output columns match schema and types
-*/
 SELECT
-  brand_normalized_name,
-  normalized_name,
-  market_normalized_name,
+  brand_name,
+  product_name,
+  market_name,
   competitor_flag,
-  channel_name,
-  transaction_timestamp,
-  SUM(integrated_units) AS total_integrated_units,
-  SUM(integrated_normalized_units) AS total_integrated_normalized_units,
-  SUM(integrated_dollars) AS total_integrated_dollars
-FROM valid_sales
+  channel,
+  transaction_time,
+  -- Zero sales if brand in ('kanjinti','mvasi','riabni') and gpo_flag contains 'KAISER' (case-insensitive)
+  CASE
+    WHEN brand_name IN ('kanjinti', 'mvasi', 'riabni')
+      AND LOWER(gpo_flag) LIKE '%kaiser%'
+    THEN 0.00
+    ELSE SUM(integrated_units)
+  END AS integrated_units,
+  CASE
+    WHEN brand_name IN ('kanjinti', 'mvasi', 'riabni')
+      AND LOWER(gpo_flag) LIKE '%kaiser%'
+    THEN 0.00
+    ELSE SUM(integrated_normalized_units)
+  END AS integrated_normalized_units,
+  CASE
+    WHEN brand_name IN ('kanjinti', 'mvasi', 'riabni')
+      AND LOWER(gpo_flag) LIKE '%kaiser%'
+    THEN 0.00
+    ELSE SUM(integrated_dollars)
+  END AS integrated_dollars
+FROM filtered_sales
 GROUP BY
-  brand_normalized_name,
-  normalized_name,
-  market_normalized_name,
+  brand_name,
+  product_name,
+  market_name,
   competitor_flag,
-  channel_name,
-  transaction_timestamp
-ORDER BY
-  brand_normalized_name,
-  normalized_name,
-  market_normalized_name,
-  competitor_flag,
-  channel_name,
-  transaction_timestamp
-;
-
-/*
-  Error Log Output
-  - For monitoring and data quality checks
-*/
-SELECT * FROM error_log
-WHERE error_message IS NOT NULL
-ORDER BY transaction_timestamp
-;
-
+  channel,
+  transaction_time
+ORDER BY brand_name, product_name, market_name, competitor_flag, channel, transaction_time;
+-- End of script
