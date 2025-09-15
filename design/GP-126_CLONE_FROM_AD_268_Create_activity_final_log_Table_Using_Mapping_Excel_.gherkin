@@ -1,163 +1,153 @@
-Feature: Creation and population of activity_final_log table in purgo_playground schema based on Final Act Log mapping specification
+Feature: Creation of activity_final_log table in Unity Catalog purgo_databricks.purgo_playground
+
+  The activity_final_log table is created from AWS.entity_activity_log and AWS.priority_weight_settings
+  with specific filtering, joining, and transformation logic as per the "Final Act Log" mapping specification.
 
   Background:
-    Given the source tables entity_activity_log and priority_weight_settings exist in purgo_playground schema
-    And the target table activity_final_log exists in purgo_playground schema with columns:
-      | id              | bigint         | not null   |
-      | name            | string         | not null   |
-      | created_at      | timestamp      | not null   |
-      | value           | double         | not null   |
-      | decimal_value   | decimal(10,5)  | not null   |
-      | nullable_string | string         | nullable   |
-      | special_char_string | string     | nullable   |
-    And the mapping specification for activity_final_log requires columns:
-      | usr_id          | string         | not null   |
-      | usr_name        | string         | not null   |
-      | date            | date           | not null   |
-      | activity_bucket | string         | not null   |
-      | new_act_flag    | string         | not null   |
-    And the mapping logic is as follows:
-      | Only include records where activity_closed_at >= '2025-01-01' and activity_closed_at is not NULL |
-      | Only include records where activity_subcategory = 'Task'                                        |
-      | Only include records where modified_by_user_role = 'PN'                                         |
-      | Only include records where interaction_type IN ('C&R', 'PF')                                    |
-      | activity_bucket is populated by left joining entity_activity_log.subject = priority_weight_settings.task_category and selecting priority_level_desc |
-      | new_act_flag is populated as: if cutoff_timestamp is NULL then 'New', else if activity_closed_at <= cutoff_timestamp then 'New', else 'Continuing' |
-    And the activity_final_log_errors table exists for error logging with columns:
-      | usr_id          | string         | nullable   |
-      | usr_name        | string         | nullable   |
-      | date            | string         | nullable   |
-      | activity_bucket | string         | nullable   |
-      | new_act_flag    | string         | nullable   |
-      | error_message   | string         | nullable   |
-      | error_timestamp | timestamp      | nullable   |
+    Given the source table AWS.entity_activity_log exists and is accessible
+    And the source table AWS.priority_weight_settings exists and is accessible
+    And the target table activity_final_log does not exist in purgo_databricks.purgo_playground
+    And the following columns are required in activity_final_log:
+      | Column Name      | Data Type | Description                                                                 |
+      | usr_id           | string    | Distinct modified_by_user_id from entity_activity_log                       |
+      | usr_name         | string    | Distinct modified_by_user_name associated with usr_id                       |
+      | date             | date      | Distinct Date (activity_closed_at) associated with usr_id & usr_name        |
+      | activity_bucket  | string    | Distinct priority_level_desc from priority_weight_settings for usr_id, date |
+      | new_act_flag     | string    | 'New' or 'Continuing' based on cutoff_timestamp and activity_closed_at      |
 
-  Scenario: Happy path - Successful population of activity_final_log with valid records
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "A123"              | "John Doe"            | 2025-01-15        | 2025-01-10 12:00:00   | "Task"              | "PN"                 | "C&R"           | "Support"    |
-      | "B456"              | "Jane Smith"          | 2025-02-01        | NULL                  | "Task"              | "PN"                 | "PF"            | "Billing"    |
-    And priority_weight_settings contains records:
-      | task_category | priority_level_desc |
-      | "Support"     | "High"              |
-      | "Billing"     | "Medium"            |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag |
-      | "A123" | "John Doe" | 2025-01-15  | "High"         | "New"        |
-      | "B456" | "Jane Smith"| 2025-02-01 | "Medium"       | "New"        |
-    And no records should be inserted into activity_final_log_errors
+  Scenario: Create activity_final_log table with correct schema
+    When the Databricks SQL script is executed to create activity_final_log table
+    Then the table activity_final_log should exist in purgo_databricks.purgo_playground
+    And the table should have columns:
+      | usr_id          | string |
+      | usr_name        | string |
+      | date            | date   |
+      | activity_bucket | string |
+      | new_act_flag    | string |
 
-  Scenario: Error path - Exclude records with activity_closed_at before Jan 2025 or NULL
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "C789"              | "Alice Lee"           | 2024-12-31        | 2025-01-01 09:00:00   | "Task"              | "PN"                 | "C&R"           | "Support"    |
-      | "D012"              | "Bob Ray"             | NULL              | 2025-01-01 09:00:00   | "Task"              | "PN"                 | "PF"            | "Billing"    |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should not contain records for usr_id "C789" or "D012"
-    And activity_final_log_errors should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | "C789" | "Alice Lee"| 2024-12-31  | "High"         | "New"        | "activity_closed_at before Jan 2025"           | <current_timestamp> |
-      | "D012" | "Bob Ray"  | NULL        | "Medium"       | "New"        | "activity_closed_at is NULL"                   | <current_timestamp> |
-
-  Scenario: Error path - Exclude records with activity_subcategory not equal to 'Task'
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "E345"              | "Carol King"          | 2025-01-20        | 2025-01-19 10:00:00   | "Call"              | "PN"                 | "C&R"           | "Support"    |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should not contain records for usr_id "E345"
-    And activity_final_log_errors should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | "E345" | "Carol King"| 2025-01-20 | "High"         | "New"        | "activity_subcategory not 'Task'"              | <current_timestamp> |
-
-  Scenario: Error path - Exclude records with modified_by_user_role not equal to 'PN'
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "F678"              | "Dan Fox"             | 2025-01-25        | 2025-01-24 08:00:00   | "Task"              | "Admin"              | "C&R"           | "Support"    |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should not contain records for usr_id "F678"
-    And activity_final_log_errors should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | "F678" | "Dan Fox"  | 2025-01-25  | "High"         | "New"        | "modified_by_user_role not 'PN'"               | <current_timestamp> |
-
-  Scenario: Error path - Exclude records with interaction_type not in ('C&R', 'PF')
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "G901"              | "Eve Moss"            | 2025-01-30        | 2025-01-29 07:00:00   | "Task"              | "PN"                 | "Email"         | "Support"    |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should not contain records for usr_id "G901"
-    And activity_final_log_errors should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | "G901" | "Eve Moss" | 2025-01-30  | "High"         | "New"        | "interaction_type not in ('C&R', 'PF')"        | <current_timestamp> |
-
-  Scenario Outline: Data-driven test for new_act_flag population logic
-    Given entity_activity_log contains a record:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | <usr_id>            | <usr_name>            | <activity_closed_at>| <cutoff_timestamp>   | "Task"              | "PN"                 | <interaction_type>| <subject>   |
-    And priority_weight_settings contains a record:
-      | task_category | priority_level_desc |
-      | <subject>     | <priority_level_desc> |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should contain a record:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag |
-      | <usr_id> | <usr_name> | <activity_closed_at> | <priority_level_desc> | <expected_new_act_flag> |
+  Scenario Outline: Insert valid records into activity_final_log with correct transformation and filtering
+    Given a record in AWS.entity_activity_log with:
+      | modified_by_user_id     | <usr_id>         |
+      | modified_by_user_name   | <usr_name>       |
+      | activity_closed_at      | <activity_closed_at> |
+      | activity_subcategory    | <activity_subcategory> |
+      | modified_by_user_role   | <modified_by_user_role> |
+      | interaction_type        | <interaction_type> |
+      | subject                 | <subject>        |
+      | cutoff_timestamp        | <cutoff_timestamp> |
+    And a record in AWS.priority_weight_settings with:
+      | task_category           | <task_category>  |
+      | priority_level_desc     | <priority_level_desc> |
+    When the Databricks SQL script is executed
+    Then a record should be inserted into activity_final_log with:
+      | usr_id          | <usr_id>                |
+      | usr_name        | <usr_name>              |
+      | date            | <activity_closed_at_date> |
+      | activity_bucket | <priority_level_desc>    |
+      | new_act_flag    | <expected_new_act_flag>  |
 
     Examples:
-      | usr_id | usr_name   | activity_closed_at | cutoff_timestamp      | interaction_type | subject   | priority_level_desc | expected_new_act_flag |
-      | "H234" | "Frank Wu" | 2025-02-10        | NULL                 | "C&R"           | "Support" | "High"              | "New"                |
-      | "I567" | "Grace Lin"| 2025-02-15        | 2025-02-16 12:00:00  | "PF"            | "Billing" | "Medium"            | "New"                |
-      | "J890" | "Henry Kim"| 2025-02-20        | 2025-02-19 12:00:00  | "C&R"           | "Support" | "High"              | "Continuing"         |
+      | usr_id | usr_name | activity_closed_at     | activity_subcategory | modified_by_user_role | interaction_type | subject   | cutoff_timestamp | task_category | priority_level_desc | activity_closed_at_date | expected_new_act_flag |
+      | U123   | Alice    | 2025-01-02T10:00:00Z  | Task                | PN                   | C&R             | Billing   | 2025-01-02       | Billing       | High               | 2025-01-02             | New                  |
+      | U124   | Bob      | 2025-01-03T12:00:00Z  | Task                | PN                   | PF              | Support   | NULL             | Support       | Medium             | 2025-01-03             | New                  |
+      | U125   | Carol    | 2025-01-04T09:00:00Z  | Task                | PN                   | C&R             | Claims    | 2025-01-03       | Claims        | Low                | 2025-01-04             | Continuing           |
 
-  Scenario: Error path - Log error when priority_weight_settings join does not find a match
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "K123"              | "Ivy Chen"            | 2025-03-01        | NULL                  | "Task"              | "PN"                 | "C&R"           | "Unknown"    |
-    And priority_weight_settings does not contain a record with task_category = "Unknown"
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should not contain records for usr_id "K123"
-    And activity_final_log_errors should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | "K123" | "Ivy Chen" | 2025-03-01  | NULL            | "New"        | "No matching priority_level_desc for subject"  | <current_timestamp> |
+  Scenario Outline: Do not insert records that fail filter criteria
+    Given a record in AWS.entity_activity_log with:
+      | modified_by_user_id     | <usr_id>         |
+      | modified_by_user_name   | <usr_name>       |
+      | activity_closed_at      | <activity_closed_at> |
+      | activity_subcategory    | <activity_subcategory> |
+      | modified_by_user_role   | <modified_by_user_role> |
+      | interaction_type        | <interaction_type> |
+      | subject                 | <subject>        |
+      | cutoff_timestamp        | <cutoff_timestamp> |
+    And a record in AWS.priority_weight_settings with:
+      | task_category           | <task_category>  |
+      | priority_level_desc     | <priority_level_desc> |
+    When the Databricks SQL script is executed
+    Then no record should be inserted into activity_final_log for this input
 
-  Scenario: Error path - Log error when required source columns are NULL
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | NULL                | "Jack Lee"            | 2025-03-05        | NULL                  | "Task"              | "PN"                 | "C&R"           | "Support"    |
-      | "L456"              | NULL                  | 2025-03-06        | NULL                  | "Task"              | "PN"                 | "PF"            | "Billing"    |
-    And priority_weight_settings contains records:
-      | task_category | priority_level_desc |
-      | "Support"     | "High"              |
-      | "Billing"     | "Medium"            |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then activity_final_log should not contain records for usr_id NULL or "L456"
-    And activity_final_log_errors should contain records:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | NULL   | "Jack Lee" | 2025-03-05  | "High"         | "New"        | "modified_by_user_id is NULL"                  | <current_timestamp> |
-      | "L456" | NULL       | 2025-03-06  | "Medium"       | "New"        | "modified_by_user_name is NULL"                | <current_timestamp> |
+    Examples:
+      | usr_id | usr_name | activity_closed_at     | activity_subcategory | modified_by_user_role | interaction_type | subject   | cutoff_timestamp | task_category | priority_level_desc |
+      | U126   | Dave     | 2024-12-31T23:59:59Z  | Task                | PN                   | C&R             | Billing   | 2025-01-02       | Billing       | High               |  # activity_closed_at before 2025-01-01
+      | U127   | Eve      | NULL                  | Task                | PN                   | PF              | Support   | NULL             | Support       | Medium             |  # activity_closed_at is NULL
+      | U128   | Frank    | 2025-01-05T10:00:00Z  | Case                | PN                   | C&R             | Claims    | 2025-01-03       | Claims        | Low                |  # activity_subcategory != 'Task'
+      | U129   | Grace    | 2025-01-06T11:00:00Z  | Task                | Admin                | PF              | Billing   | 2025-01-06       | Billing       | High               |  # modified_by_user_role != 'PN'
+      | U130   | Heidi    | 2025-01-07T12:00:00Z  | Task                | PN                   | Email           | Support   | 2025-01-07       | Support       | Medium             |  # interaction_type not in ('C&R', 'PF')
 
-  Scenario: Error path - Log error when duplicate usr_id, usr_name, date combinations are found
-    Given entity_activity_log contains records:
-      | modified_by_user_id | modified_by_user_name | activity_closed_at | cutoff_timestamp      | activity_subcategory | modified_by_user_role | interaction_type | subject      |
-      | "M789"              | "Liam Park"           | 2025-04-01        | NULL                  | "Task"              | "PN"                 | "C&R"           | "Support"    |
-      | "M789"              | "Liam Park"           | 2025-04-01        | NULL                  | "Task"              | "PN"                 | "C&R"           | "Support"    |
-    And priority_weight_settings contains records:
-      | task_category | priority_level_desc |
-      | "Support"     | "High"              |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then only one record for usr_id "M789", usr_name "Liam Park", date "2025-04-01" should be inserted into activity_final_log
-    And activity_final_log_errors should contain a record:
-      | usr_id | usr_name   | date        | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | "M789" | "Liam Park"| 2025-04-01  | "High"         | "New"        | "Duplicate usr_id, usr_name, date combination" | <current_timestamp> |
+  Scenario Outline: Error handling for join mismatches
+    Given a record in AWS.entity_activity_log with:
+      | modified_by_user_id     | <usr_id>         |
+      | modified_by_user_name   | <usr_name>       |
+      | activity_closed_at      | <activity_closed_at> |
+      | activity_subcategory    | Task             |
+      | modified_by_user_role   | PN               |
+      | interaction_type        | C&R              |
+      | subject                 | <subject>        |
+      | cutoff_timestamp        | <cutoff_timestamp> |
+    And no matching record in AWS.priority_weight_settings for subject = <subject>
+    When the Databricks SQL script is executed
+    Then the activity_bucket field in activity_final_log should be NULL for this record
 
-  Scenario: Error path - Log error when mapping specification columns are missing in activity_final_log table definition
-    Given the activity_final_log table does not contain columns:
+    Examples:
+      | usr_id | usr_name | activity_closed_at     | subject   | cutoff_timestamp |
+      | U131   | Ivan     | 2025-01-08T13:00:00Z  | Unknown   | 2025-01-08      |
+      | U132   | Judy     | 2025-01-09T14:00:00Z  | Missing   | NULL            |
+
+  Scenario Outline: Validation of new_act_flag logic
+    Given a record in AWS.entity_activity_log with:
+      | activity_closed_at      | <activity_closed_at> |
+      | cutoff_timestamp        | <cutoff_timestamp>   |
+    When the Databricks SQL script is executed
+    Then the new_act_flag field should be set as follows:
+      | If cutoff_timestamp is NULL then 'New'
+      | Else if activity_closed_at <= cutoff_timestamp then 'New'
+      | Else 'Continuing'
+
+    Examples:
+      | activity_closed_at     | cutoff_timestamp | expected_new_act_flag |
+      | 2025-01-10T10:00:00Z  | NULL            | New                  |
+      | 2025-01-11T09:00:00Z  | 2025-01-11      | New                  |
+      | 2025-01-12T12:00:00Z  | 2025-01-11      | Continuing           |
+
+  Scenario: Data type validation for activity_final_log columns
+    Given the activity_final_log table is created
+    When a record is inserted
+    Then the data types of the columns should be:
+      | usr_id          | string |
+      | usr_name        | string |
+      | date            | date   |
+      | activity_bucket | string |
+      | new_act_flag    | string |
+
+  Scenario Outline: Error scenario for invalid data formats
+    Given a record in AWS.entity_activity_log with:
+      | activity_closed_at      | <activity_closed_at> |
+      | cutoff_timestamp        | <cutoff_timestamp>   |
+    When the Databricks SQL script is executed
+    Then an error should be raised with message <error_message>
+
+    Examples:
+      | activity_closed_at     | cutoff_timestamp | error_message                                      |
+      | invalid_date           | 2025-01-13      | "Invalid date format for activity_closed_at"        |
+      | 2025-01-14T10:00:00Z  | invalid_date    | "Invalid date format for cutoff_timestamp"          |
+
+  Scenario: Deduplication logic for multiple records with same usr_id, usr_name, date, activity_bucket
+    Given multiple records in AWS.entity_activity_log with same usr_id, usr_name, activity_closed_at date, and subject
+    And matching records in AWS.priority_weight_settings for subject
+    When the Databricks SQL script is executed
+    Then only distinct combinations of usr_id, usr_name, date, activity_bucket should be present in activity_final_log
+
+  Scenario: Table creation as managed table
+    When the Databricks SQL script is executed
+    Then the activity_final_log table should be created as a managed table in purgo_databricks.purgo_playground
+
+  Scenario: No additional metadata columns are present
+    When the Databricks SQL script is executed
+    Then the activity_final_log table should only contain the specified columns:
       | usr_id          |
       | usr_name        |
       | date            |
       | activity_bucket |
       | new_act_flag    |
-    When the Databricks SQL script is executed to populate activity_final_log
-    Then no records should be inserted into activity_final_log
-    And activity_final_log_errors should contain a record:
-      | usr_id | usr_name | date | activity_bucket | new_act_flag | error_message                                 | error_timestamp      |
-      | NULL   | NULL     | NULL | NULL           | NULL         | "Target table missing required columns"        | <current_timestamp> |
