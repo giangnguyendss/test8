@@ -1,160 +1,141 @@
-Feature: SQL Aggregation of Sales Data by Brand, Product, Market, Competitor Flag, Channel, and Transaction Time
+Feature: SQL Aggregation of Sales Data for Specified Brands, Products, Markets, and Conditions
 
-  This feature specifies the technical requirements for aggregating sales data from the purgo_playground.bai_sales_agg_obu_customer_datapack_weekly table. The aggregation must be performed for each unique combination of brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, and transaction_timestamp, with conditional logic and strict validation rules.
+  The system must aggregate sales data from the bai_sales_agg_obu_customer_datapack_weekly table in Unity Catalog purgo_databricks, schema purgo_playground, for each unique combination of brand_name, product_name, market_name, competitor_flag, channel, and transaction_time. The aggregation must sum integrated_units, integrated_normalized_units, and integrated_dollars, applying specific business rules for brands and GPO flags, date filtering, and market inclusion.
 
   Background:
-    Given the source table is purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
-    And the columns to aggregate are integrated_units, integrated_normalized_units, and integrated_dollars
-    And the aggregation keys are brand_normalized_name, normalized_name, market_normalized_name, competitor_flag, channel_name, transaction_timestamp
-    And only rows where market_normalized_name is "trastuzumab-anns", "bevacizumab-awwb", or "rituximab market" are included
-    And only rows where transaction_timestamp is within the last 36 months from cdl_effective_date are included
-    And for rows where brand_normalized_name is "kanjinti", "mvasi", or "riabni" and br_gpo_flag contains "KAISER" (case-insensitive), integrated_units, integrated_normalized_units, and integrated_dollars are treated as zero before aggregation
+    Given the source table is purgo_databricks.purgo_playground.bai_sales_agg_obu_customer_datapack_weekly
+    And the columns used are:
+      | brand_name                | STRING  |
+      | product_name              | STRING  |
+      | market_name               | STRING  |
+      | competitor_flag           | STRING  |
+      | channel                   | STRING  |
+      | transaction_time          | DATE    |
+      | integrated_units          | NUMERIC |
+      | integrated_normalized_units| NUMERIC |
+      | integrated_dollars        | NUMERIC |
+      | gpo_flag                  | STRING  |
+      | cdl_effective_date        | DATE    |
+    And the valid market_name values are "trastuzumab-anns", "bevacizumab-awwb", "rituximab market"
+    And the valid brand_name values for zeroing sales are "kanjinti", "mvasi", "riabni"
+    And the GPO flag must be checked for substring "KAISER" (case-insensitive)
+    And transaction_time must be within the last 36 months from cdl_effective_date (inclusive)
+    And aggregation is performed for each unique combination of brand_name, product_name, market_name, competitor_flag, channel, transaction_time
 
-  Scenario: Aggregate sales data for valid rows (happy path)
-    Given a row with brand_normalized_name "kanjinti"
-    And normalized_name "Herceptin"
-    And market_normalized_name "trastuzumab-anns"
-    And competitor_flag false
-    And channel_name "Hospital"
-    And transaction_timestamp "2023-05-15T00:00:00"
-    And integrated_units 100
-    And integrated_normalized_units 95
-    And integrated_dollars 12000.50
-    And br_gpo_flag "ABC GPO"
-    And cdl_effective_date "2023-06-01"
-    When the SQL script is executed
-    Then the row is included in the aggregation
-    And the aggregated integrated_units is 100
-    And the aggregated integrated_normalized_units is 95
-    And the aggregated integrated_dollars is 12000.50
-
-  Scenario: Exclude rows with invalid market_normalized_name
-    Given a row with market_normalized_name "other-market"
-    When the SQL script is executed
-    Then the row is excluded from the aggregation
-
-  Scenario: Exclude rows with transaction_timestamp outside 36 months window
-    Given a row with transaction_timestamp "2019-01-01T00:00:00"
-    And cdl_effective_date "2023-06-01"
-    When the SQL script is executed
-    Then the row is excluded from the aggregation
-
-  Scenario Outline: Set sales values to zero for specific brands and GPO flag containing "KAISER"
-    Given a row with brand_normalized_name <brand>
-    And normalized_name <product>
-    And market_normalized_name <market>
-    And competitor_flag <competitor>
-    And channel_name <channel>
-    And transaction_timestamp <timestamp>
-    And integrated_units <units>
-    And integrated_normalized_units <normalized_units>
-    And integrated_dollars <dollars>
-    And br_gpo_flag <gpo_flag>
-    And cdl_effective_date <cdl_date>
-    When the SQL script is executed
-    Then the aggregated integrated_units is 0
-    And the aggregated integrated_normalized_units is 0
-    And the aggregated integrated_dollars is 0
+  Scenario Outline: Aggregate sales data for valid combinations and apply business rules
+    Given a row with brand_name "<brand_name>", product_name "<product_name>", market_name "<market_name>", competitor_flag "<competitor_flag>", channel "<channel>", transaction_time "<transaction_time>", integrated_units <integrated_units>, integrated_normalized_units <integrated_normalized_units>, integrated_dollars <integrated_dollars>, gpo_flag "<gpo_flag>", cdl_effective_date "<cdl_effective_date>"
+    When the market_name is one of "trastuzumab-anns", "bevacizumab-awwb", "rituximab market"
+    And the transaction_time is within 36 months prior to and including cdl_effective_date
+    And the brand_name is "<brand_name>"
+    And the gpo_flag contains "KAISER" (case-insensitive)
+    Then the aggregated integrated_units, integrated_normalized_units, and integrated_dollars for this combination must be zero
+    And the output must include the combination with zeroed values
 
     Examples:
-      | brand     | product    | market             | competitor | channel   | timestamp           | units | normalized_units | dollars   | gpo_flag         | cdl_date    |
-      | kanjinti  | Herceptin  | trastuzumab-anns   | false      | Hospital  | 2023-05-15T00:00:00 | 100   | 95              | 12000.50  | KAISER PERMANENTE| 2023-06-01  |
-      | mvasi     | Avastin    | bevacizumab-awwb   | true       | Clinic    | 2022-11-10T00:00:00 | 50    | 48              | 8000.00   | Kaiser Northwest | 2022-12-01  |
-      | riabni    | Rituxan    | rituximab market   | false      | Pharmacy  | 2021-07-20T00:00:00 | 30    | 29              | 5000.00   | kaiser south     | 2021-08-01  |
+      | brand_name | product_name | market_name        | competitor_flag | channel | transaction_time | integrated_units | integrated_normalized_units | integrated_dollars | gpo_flag         | cdl_effective_date |
+      | kanjinti   | prodA        | trastuzumab-anns   | Y               | retail  | 2023-05-01       | 100              | 90                        | 1000              | KAISER PERM      | 2023-06-01         |
+      | mvasi      | prodB        | bevacizumab-awwb   | N               | hospital| 2022-12-15       | 200              | 180                       | 2000              | kaiser           | 2023-01-01         |
+      | riabni     | prodC        | rituximab market   | Y               | retail  | 2021-07-10       | 50               | 45                        | 500               | Kaiser Permanente| 2021-08-01         |
 
-  Scenario Outline: Do not set sales values to zero for specific brands if GPO flag does not contain "KAISER"
-    Given a row with brand_normalized_name <brand>
-    And normalized_name <product>
-    And market_normalized_name <market>
-    And competitor_flag <competitor>
-    And channel_name <channel>
-    And transaction_timestamp <timestamp>
-    And integrated_units <units>
-    And integrated_normalized_units <normalized_units>
-    And integrated_dollars <dollars>
-    And br_gpo_flag <gpo_flag>
-    And cdl_effective_date <cdl_date>
-    When the SQL script is executed
-    Then the aggregated integrated_units is <units>
-    And the aggregated integrated_normalized_units is <normalized_units>
-    And the aggregated integrated_dollars is <dollars>
+  Scenario Outline: Aggregate sales data for valid combinations without zeroing sales
+    Given a row with brand_name "<brand_name>", product_name "<product_name>", market_name "<market_name>", competitor_flag "<competitor_flag>", channel "<channel>", transaction_time "<transaction_time>", integrated_units <integrated_units>, integrated_normalized_units <integrated_normalized_units>, integrated_dollars <integrated_dollars>, gpo_flag "<gpo_flag>", cdl_effective_date "<cdl_effective_date>"
+    When the market_name is one of "trastuzumab-anns", "bevacizumab-awwb", "rituximab market"
+    And the transaction_time is within 36 months prior to and including cdl_effective_date
+    And (the brand_name is not "kanjinti", "mvasi", "riabni" OR the gpo_flag does not contain "KAISER" case-insensitive)
+    Then the aggregated integrated_units, integrated_normalized_units, and integrated_dollars for this combination must be the sum of the respective values
+    And the output must include the combination with summed values
 
     Examples:
-      | brand     | product    | market             | competitor | channel   | timestamp           | units | normalized_units | dollars   | gpo_flag         | cdl_date    |
-      | kanjinti  | Herceptin  | trastuzumab-anns   | false      | Hospital  | 2023-05-15T00:00:00 | 100   | 95              | 12000.50  | ABC GPO          | 2023-06-01  |
-      | mvasi     | Avastin    | bevacizumab-awwb   | true       | Clinic    | 2022-11-10T00:00:00 | 50    | 48              | 8000.00   | XYZ GPO          | 2022-12-01  |
-      | riabni    | Rituxan    | rituximab market   | false      | Pharmacy  | 2021-07-20T00:00:00 | 30    | 29              | 5000.00   | Some GPO         | 2021-08-01  |
+      | brand_name | product_name | market_name        | competitor_flag | channel | transaction_time | integrated_units | integrated_normalized_units | integrated_dollars | gpo_flag         | cdl_effective_date |
+      | herceptin  | prodA        | trastuzumab-anns   | Y               | retail  | 2023-05-01       | 100              | 90                        | 1000              | ABC GPO          | 2023-06-01         |
+      | mvasi      | prodB        | bevacizumab-awwb   | N               | hospital| 2022-12-15       | 200              | 180                       | 2000              | XYZ GPO          | 2023-01-01         |
+      | riabni     | prodC        | rituximab market   | Y               | retail  | 2021-07-10       | 50               | 45                        | 500               | DEF GPO          | 2021-08-01         |
 
-  Scenario Outline: Exclude rows with NULL or invalid cdl_effective_date
-    Given a row with brand_normalized_name <brand>
-    And normalized_name <product>
-    And market_normalized_name <market>
-    And competitor_flag <competitor>
-    And channel_name <channel>
-    And transaction_timestamp <timestamp>
-    And integrated_units <units>
-    And integrated_normalized_units <normalized_units>
-    And integrated_dollars <dollars>
-    And br_gpo_flag <gpo_flag>
-    And cdl_effective_date <cdl_date>
-    When the SQL script is executed
-    Then the row is excluded from the aggregation
-    And an error message "Invalid cdl_effective_date" is logged
+  Scenario Outline: Exclude rows with invalid market_name
+    Given a row with market_name "<market_name>"
+    When the market_name is not "trastuzumab-anns", "bevacizumab-awwb", or "rituximab market"
+    Then the row must be excluded from aggregation
+    And no output should be generated for this combination
 
     Examples:
-      | brand     | product    | market             | competitor | channel   | timestamp           | units | normalized_units | dollars   | gpo_flag         | cdl_date    |
-      | kanjinti  | Herceptin  | trastuzumab-anns   | false      | Hospital  | 2023-05-15T00:00:00 | 100   | 95              | 12000.50  | KAISER PERMANENTE| NULL        |
-      | mvasi     | Avastin    | bevacizumab-awwb   | true       | Clinic    | 2022-11-10T00:00:00 | 50    | 48              | 8000.00   | Kaiser Northwest | INVALID     |
+      | market_name        |
+      | abc-market         |
+      | xyz-market         |
+      | test-market        |
 
-  Scenario Outline: Aggregate multiple rows for the same combination
-    Given multiple rows with the same brand_normalized_name <brand>, normalized_name <product>, market_normalized_name <market>, competitor_flag <competitor>, channel_name <channel>, and transaction_timestamp <timestamp>
-    And the rows have integrated_units <units1> and <units2>
-    And the rows have integrated_normalized_units <normalized_units1> and <normalized_units2>
-    And the rows have integrated_dollars <dollars1> and <dollars2>
-    And br_gpo_flag <gpo_flag1> and <gpo_flag2>
-    And cdl_effective_date <cdl_date>
-    When the SQL script is executed
-    Then the aggregated integrated_units is <units1> + <units2>
-    And the aggregated integrated_normalized_units is <normalized_units1> + <normalized_units2>
-    And the aggregated integrated_dollars is <dollars1> + <dollars2>
+  Scenario Outline: Exclude rows with transaction_time outside 36 months window
+    Given a row with transaction_time "<transaction_time>" and cdl_effective_date "<cdl_effective_date>"
+    When transaction_time is more than 36 months before cdl_effective_date
+    Then the row must be excluded from aggregation
+    And no output should be generated for this combination
 
     Examples:
-      | brand     | product    | market             | competitor | channel   | timestamp           | units1 | units2 | normalized_units1 | normalized_units2 | dollars1 | dollars2 | gpo_flag1 | gpo_flag2 | cdl_date    |
-      | kanjinti  | Herceptin  | trastuzumab-anns   | false      | Hospital  | 2023-05-15T00:00:00 | 100    | 50     | 95                | 45                | 12000.50 | 6000.00  | ABC GPO   | ABC GPO   | 2023-06-01  |
-      | mvasi     | Avastin    | bevacizumab-awwb   | true       | Clinic    | 2022-11-10T00:00:00 | 50     | 30     | 48                | 28                | 8000.00  | 4000.00  | XYZ GPO   | XYZ GPO   | 2022-12-01  |
+      | transaction_time | cdl_effective_date |
+      | 2019-01-01       | 2023-06-01         |
+      | 2018-05-15       | 2021-08-01         |
+      | 2017-12-31       | 2021-12-31         |
+
+  Scenario Outline: Error handling for missing required fields
+    Given a row with missing "<missing_field>"
+    When the aggregation is performed
+    Then an error must be raised with message "Missing required field: <missing_field>"
+
+    Examples:
+      | missing_field      |
+      | brand_name         |
+      | product_name       |
+      | market_name        |
+      | competitor_flag    |
+      | channel            |
+      | transaction_time   |
+      | integrated_units   |
+      | integrated_normalized_units |
+      | integrated_dollars |
+      | gpo_flag           |
+      | cdl_effective_date |
+
+  Scenario Outline: Error handling for invalid data formats
+    Given a row with "<field>" value "<invalid_value>"
+    When the aggregation is performed
+    Then an error must be raised with message "Invalid format for <field>: <invalid_value>"
+
+    Examples:
+      | field                | invalid_value      |
+      | transaction_time     | not-a-date        |
+      | cdl_effective_date   | 2023/06/01        |
+      | integrated_units     | abc               |
+      | integrated_dollars   | $1000             |
+      | gpo_flag             | NULL              |
+
+  Scenario: Aggregation uniqueness
+    Given multiple rows with identical values for brand_name, product_name, market_name, competitor_flag, channel, transaction_time
+    When the aggregation is performed
+    Then the output must contain a single row for each unique combination
+    And the integrated_units, integrated_normalized_units, and integrated_dollars must be summed (or zeroed per business rule)
 
   Scenario: Case-insensitive matching for GPO flag "KAISER"
-    Given a row with brand_normalized_name "kanjinti"
-    And br_gpo_flag "kaiser permanente"
-    When the SQL script is executed
-    Then integrated_units, integrated_normalized_units, and integrated_dollars are set to zero before aggregation
+    Given a row with gpo_flag "kaiser permanente"
+    When the brand_name is "kanjinti"
+    Then the sales values must be zeroed
+    And the output must reflect zeroed values
 
-  Scenario: Aggregation with competitor_flag true and false
-    Given two rows with identical brand_normalized_name, normalized_name, market_normalized_name, channel_name, transaction_timestamp
-    And one row has competitor_flag true, the other false
-    When the SQL script is executed
-    Then the aggregation is performed separately for each competitor_flag value
+  Scenario: Case-sensitive brand_name matching
+    Given a row with brand_name "KANJINTI" (all caps)
+    When the gpo_flag contains "KAISER"
+    Then the sales values must NOT be zeroed
+    And the output must reflect the actual summed values
 
-  Scenario: Data type validation for aggregation columns
-    Given a row with integrated_units as integer
-    And integrated_normalized_units as integer
-    And integrated_dollars as double
-    When the SQL script is executed
-    Then the aggregation is performed without type errors
-
-  Scenario: Exclude rows with NULL in aggregation keys
-    Given a row with NULL in brand_normalized_name
-    Or NULL in normalized_name
-    Or NULL in market_normalized_name
-    Or NULL in competitor_flag
-    Or NULL in channel_name
-    Or NULL in transaction_timestamp
-    When the SQL script is executed
-    Then the row is excluded from the aggregation
-    And an error message "Missing aggregation key" is logged
-
-  Scenario: Error handling for invalid transaction_timestamp format
-    Given a row with transaction_timestamp "invalid-timestamp"
-    When the SQL script is executed
-    Then the row is excluded from the aggregation
-    And an error message "Invalid transaction_timestamp format" is logged
+  Scenario: Output column order and format
+    Given the aggregation is complete
+    Then the output must include columns in the following order:
+      | brand_name |
+      | product_name |
+      | market_name |
+      | competitor_flag |
+      | channel |
+      | transaction_time |
+      | integrated_units |
+      | integrated_normalized_units |
+      | integrated_dollars |
+    And all numeric values must be in standard decimal format
+    And all date values must be in YYYY-MM-DD format
