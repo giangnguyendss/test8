@@ -1,141 +1,93 @@
 Feature: Automate migration of eligible files from Purgo S3 landing folder to archive folder using Databricks PySpark
 
-  The script must:
-  - Reference the s3_file_process_log table in Unity Catalog (purgo_databricks.purgo_playground)
-  - Move only files with file_status = 'SUCCESS'
-  - Dynamically read s3_landing_path and s3_archive_path for each file from the log table
-  - Use Databricks secrets "access_key" and "secret_key" from scope "aws_keys" for S3 access
-  - Handle error scenarios such as missing files, permission issues, and duplicate files in archive
-
   Background:
     Given the Databricks secret scope "aws_keys" contains "access_key" and "secret_key"
-    And the Unity Catalog is "purgo_databricks" and schema is "purgo_playground"
-    And the table "s3_file_process_log" contains columns: file_id (string), file_name (string), file_status (string), s3_landing_path (string), s3_archive_path (string), processed_timestamp (timestamp)
+    And the Unity Catalog is "purgo_databricks" and Schema is "purgo_playground"
+    And the table "s3_file_process_log" exists in the schema "purgo_playground"
+    And the table "s3_file_process_log" has columns: file_id (string), file_name (string), file_status (string), s3_landing_path (string), s3_archive_path (string), processed_timestamp (timestamp)
     And the S3 path format is "s3://<bucket>/<folder>/<subfolder>"
+    And only files with file_status = "SUCCESS" are eligible for migration
 
-  Scenario: Move eligible files from landing to archive folder (happy path)
-    Given the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | 123     | patient_20240601.csv | SUCCESS     | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-    And the file "patient_20240601.csv" exists in "s3://agilisium-playground-dev/filestore/purgo/patient_raw"
-    When the script is executed
-    Then the file "patient_20240601.csv" is moved from "s3://agilisium-playground-dev/filestore/purgo/patient_raw" to "s3://agilisium-playground-dev/filestore/purgo/patient_archive"
-    And the file no longer exists in "s3://agilisium-playground-dev/filestore/purgo/patient_raw"
-    And the file exists in "s3://agilisium-playground-dev/filestore/purgo/patient_archive"
-
-  Scenario Outline: Do not move files with non-SUCCESS status
-    Given the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | <file_status> | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    And the file "<file_name>" exists in "<s3_landing_path>"
-    When the script is executed
-    Then the file "<file_name>" is not moved to "<s3_archive_path>"
-    And the file "<file_name>" remains in "<s3_landing_path>"
-
-    Examples:
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | 124     | patient_20240602.csv | FAILED      | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-      | 125     | patient_20240603.csv | IN_PROGRESS | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-
-  Scenario Outline: Error when file does not exist in landing folder
-    Given the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | SUCCESS     | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    And the file "<file_name>" does not exist in "<s3_landing_path>"
-    When the script is executed
-    Then an error is logged with message "File <file_name> not found in <s3_landing_path>"
-    And the file is not moved to "<s3_archive_path>"
-
-    Examples:
-      | file_id | file_name         | s3_landing_path                                              | s3_archive_path                                               |
-      | 126     | patient_20240604.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-
-  Scenario Outline: Error when file already exists in archive folder
-    Given the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | SUCCESS     | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    And the file "<file_name>" exists in "<s3_landing_path>"
-    And the file "<file_name>" already exists in "<s3_archive_path>"
-    When the script is executed
-    Then an error is logged with message "File <file_name> already exists in <s3_archive_path>"
-    And the file is not moved from "<s3_landing_path>"
-
-    Examples:
-      | file_id | file_name         | s3_landing_path                                              | s3_archive_path                                               |
-      | 127     | patient_20240605.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-
-  Scenario Outline: Error when S3 credentials are missing or invalid
-    Given the Databricks secret scope "aws_keys" does not contain valid "access_key" and "secret_key"
-    And the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | SUCCESS     | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    When the script is executed
-    Then an error is logged with message "Invalid or missing AWS credentials in Databricks secret scope aws_keys"
-    And no files are moved
-
-    Examples:
-      | file_id | file_name         | s3_landing_path                                              | s3_archive_path                                               |
-      | 128     | patient_20240606.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-
-  Scenario Outline: Error when S3 permissions are insufficient
-    Given the Databricks secret scope "aws_keys" contains "access_key" and "secret_key" with insufficient S3 permissions
-    And the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | SUCCESS     | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    And the file "<file_name>" exists in "<s3_landing_path>"
-    When the script is executed
-    Then an error is logged with message "Insufficient S3 permissions to move file <file_name> from <s3_landing_path> to <s3_archive_path>"
-    And the file is not moved
-
-    Examples:
-      | file_id | file_name         | s3_landing_path                                              | s3_archive_path                                               |
-      | 129     | patient_20240607.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-
-  Scenario Outline: Error when source and target S3 paths are identical
-    Given the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | SUCCESS     | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    And the file "<file_name>" exists in "<s3_landing_path>"
-    And "<s3_landing_path>" is equal to "<s3_archive_path>"
-    When the script is executed
-    Then an error is logged with message "Source and target S3 paths are identical for file <file_name>"
-    And the file is not moved
-
-    Examples:
-      | file_id | file_name         | s3_landing_path                                              | s3_archive_path                                               |
-      | 130     | patient_20240608.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_raw     |
+  Scenario: Migrate eligible files from landing to archive folder (happy path)
+    Given there are files in "s3_file_process_log" with file_status = "SUCCESS"
+    And each file has a valid s3_landing_path and s3_archive_path
+    When the PySpark script is executed
+    Then the script reads AWS credentials from Databricks secret scope "aws_keys"
+    And the script queries "purgo_databricks.purgo_playground.s3_file_process_log" for files with file_status = "SUCCESS"
+    And for each eligible file, the script moves the file from s3_landing_path to s3_archive_path
+    And the file is deleted from the source s3_landing_path after successful copy
+    And the file appears in the target s3_archive_path with the same file_name
+    And the script logs the migration event with file_id, file_name, source, target, and timestamp
 
   Scenario Outline: Data-driven migration of multiple eligible files
-    Given the s3_file_process_log table contains multiple files with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | <file_id> | <file_name>     | SUCCESS     | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    And each file "<file_name>" exists in "<s3_landing_path>"
-    When the script is executed
-    Then each file "<file_name>" is moved from "<s3_landing_path>" to "<s3_archive_path>"
-    And each file no longer exists in "<s3_landing_path>"
-    And each file exists in "<s3_archive_path>"
-
-    Examples:
-      | file_id | file_name         | s3_landing_path                                              | s3_archive_path                                               |
-      | 131     | patient_20240609.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-      | 132     | patient_20240610.csv | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-
-  Scenario: Validation of S3 path format in log table
-    Given the s3_file_process_log table contains a file with
-      | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | 133     | patient_20240611.csv | SUCCESS     | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
-    When the script reads the S3 paths
-    Then the S3 paths must match the format "s3://<bucket>/<folder>/<subfolder>"
-    And if the format is invalid, an error is logged with message "Invalid S3 path format for file <file_name>"
-
-  Scenario Outline: Validation rules for file_status
-    Given the s3_file_process_log table contains a file with
+    Given the following files exist in "s3_file_process_log":
       | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
       | <file_id> | <file_name>     | <file_status> | <s3_landing_path>                                         | <s3_archive_path>                                            |
-    When the script checks file_status
-    Then file_status must be one of ["SUCCESS", "FAILED", "IN_PROGRESS"]
-    And if file_status is not valid, an error is logged with message "Invalid file_status '<file_status>' for file <file_name>"
+    When the PySpark script is executed
+    Then only files with file_status = "SUCCESS" are migrated from <s3_landing_path> to <s3_archive_path>
+    And the file <file_name> is deleted from <s3_landing_path> after migration
+    And the file <file_name> exists in <s3_archive_path>
+    And the migration event is logged with file_id, file_name, source, target, and timestamp
 
     Examples:
       | file_id | file_name         | file_status | s3_landing_path                                              | s3_archive_path                                               |
-      | 134     | patient_20240612.csv | ARCHIVED    | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
+      | 001     | patient1.csv      | SUCCESS     | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
+      | 002     | patient2.csv      | FAILED      | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
+      | 003     | patient3.csv      | SUCCESS     | s3://agilisium-playground-dev/filestore/purgo/patient_raw    | s3://agilisium-playground-dev/filestore/purgo/patient_archive |
+
+  Scenario: Error when AWS credentials are missing in Databricks secret scope
+    Given the Databricks secret scope "aws_keys" does not contain "access_key" or "secret_key"
+    When the PySpark script is executed
+    Then the script fails with error message "AWS credentials not found in Databricks secret scope: aws_keys"
+
+  Scenario: Error when s3_landing_path or s3_archive_path is invalid
+    Given a file in "s3_file_process_log" with file_status = "SUCCESS"
+    And the s3_landing_path or s3_archive_path does not match the format "s3://<bucket>/<folder>/<subfolder>"
+    When the PySpark script attempts migration
+    Then the script skips the file and logs error "Invalid S3 path format for file_id: <file_id>"
+
+  Scenario: Error when file does not exist in s3_landing_path
+    Given a file in "s3_file_process_log" with file_status = "SUCCESS"
+    And the file <file_name> does not exist in <s3_landing_path>
+    When the PySpark script attempts migration
+    Then the script logs error "File not found in source S3 path for file_id: <file_id>, file_name: <file_name>"
+
+  Scenario: Error when file already exists in s3_archive_path
+    Given a file in "s3_file_process_log" with file_status = "SUCCESS"
+    And the file <file_name> already exists in <s3_archive_path>
+    When the PySpark script attempts migration
+    Then the script overwrites the file in <s3_archive_path>
+    And logs warning "File overwritten in archive S3 path for file_id: <file_id>, file_name: <file_name>"
+
+  Scenario: Error when file_status is not "SUCCESS"
+    Given a file in "s3_file_process_log" with file_status != "SUCCESS"
+    When the PySpark script is executed
+    Then the script does not migrate the file
+    And logs info "File skipped due to file_status: <file_status> for file_id: <file_id>"
+
+  Scenario: Error when S3 permissions are insufficient
+    Given a file in "s3_file_process_log" with file_status = "SUCCESS"
+    And the AWS credentials do not have permission to read from <s3_landing_path> or write to <s3_archive_path>
+    When the PySpark script attempts migration
+    Then the script fails with error message "Insufficient S3 permissions for file_id: <file_id>"
+
+  Scenario: Logging migration results
+    Given the PySpark script migrates files from s3_landing_path to s3_archive_path
+    When migration is successful
+    Then the script updates the migration log with file_id, file_name, source, target, status "ARCHIVED", and processed_timestamp
+    And if migration fails, the script logs the error with file_id, file_name, error_message, and processed_timestamp
+
+  Scenario Outline: Validation of S3 path formats
+    Given the following S3 paths are provided in "s3_file_process_log":
+      | s3_path                                                      |
+      | <s3_path>                                                    |
+    When the PySpark script validates the S3 path format
+    Then the path must match the regex "^s3://[a-zA-Z0-9\-]+(/[a-zA-Z0-9_\-]+)+$"
+    And if the path does not match, the script logs error "Invalid S3 path format: <s3_path>"
+
+    Examples:
+      | s3_path                                                      |
+      | s3://agilisium-playground-dev/filestore/purgo/patient_raw    |
+      | s3://agilisium-playground-dev/filestore/purgo/patient_archive|
+      | s3:/agilisium-playground-dev/filestore/purgo/patient_raw     |
+      | agilisium-playground-dev/filestore/purgo/patient_raw         |
