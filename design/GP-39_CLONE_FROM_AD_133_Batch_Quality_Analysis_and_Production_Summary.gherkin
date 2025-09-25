@@ -1,0 +1,124 @@
+Feature: Batch Quality Analysis for purgo_playground.batch_qc
+
+  Background:
+    Given the Unity Catalog table "purgo_databricks.purgo_playground.batch_qc" exists
+    And the table contains columns: batch_id, product_name, quality_check_score
+
+  Scenario: Read batch QC data from Unity Catalog
+    When the PySpark code reads the table "purgo_databricks.purgo_playground.batch_qc"
+    Then the DataFrame contains all rows and columns from the table
+
+  Scenario Outline: Validate required columns and types
+    Given the table contains a column "<column>"
+    When the PySpark code checks the type of "<column>"
+    Then the type of "<column>" must be <type>
+    And if "<column>" is missing, raise error "Missing required column: <column>"
+    And if type mismatch, raise error "Type mismatch for column: <column>"
+
+    Examples:
+      | column               | type    |
+      | batch_id             | String  |
+      | product_name         | String  |
+      | quality_check_score  | Numeric |
+
+  Scenario Outline: Validate batch_id uniqueness
+    Given the table contains batch_id values
+    When duplicate batch_id values are found
+    Then raise warning "Duplicate batch_id detected: <batch_id>"
+
+    Examples:
+      | batch_id   |
+      | BATCH001   |
+      | BATCH002   |
+
+  Scenario Outline: Validate non-null critical fields
+    Given the table contains "<column>"
+    When any row has null in "<column>"
+    Then raise error "Null value in required column: <column>"
+
+    Examples:
+      | column               |
+      | batch_id             |
+      | product_name         |
+      | quality_check_score  |
+
+  Scenario Outline: Calculate batch quality status
+    Given a batch with batch_id "<batch_id>", product_name "<product_name>", and quality_check_score <score>
+    When the PySpark code evaluates quality_check_score
+    Then if <score> < 97, status is "fail"
+    And if <score> >= 97, status is "pass"
+
+    Examples:
+      | batch_id   | product_name | score | status |
+      | BATCH001   | WidgetA      | 96.5  | fail   |
+      | BATCH002   | WidgetA      | 97.0  | pass   |
+      | BATCH003   | WidgetB      | 99.2  | pass   |
+      | BATCH004   | WidgetB      | 95.0  | fail   |
+
+  Scenario Outline: Product-wise batch analysis
+    Given batches for product "<product_name>"
+    When the PySpark code aggregates by product_name
+    Then output total_batches, passed_batches, failed_batches, percent_passed
+
+    Examples:
+      | product_name | total_batches | passed_batches | failed_batches | percent_passed |
+      | WidgetA      | 2             | 1              | 1              | 50.0           |
+      | WidgetB      | 2             | 1              | 1              | 50.0           |
+      | WidgetC      | 1             | 1              | 0              | 100.0          |
+
+  Scenario Outline: Batch-wise quality status output
+    Given a batch with batch_id "<batch_id>", product_name "<product_name>", quality_check_score <score>
+    When the PySpark code calculates status
+    Then output batch_id, product_name, quality_check_score, status
+
+    Examples:
+      | batch_id   | product_name | quality_check_score | status |
+      | BATCH001   | WidgetA      | 96.5               | fail   |
+      | BATCH002   | WidgetA      | 97.0               | pass   |
+      | BATCH003   | WidgetB      | 99.2               | pass   |
+      | BATCH004   | WidgetB      | 95.0               | fail   |
+      | BATCH005   | WidgetC      | 98.0               | pass   |
+
+  Scenario: Batch-wise production summary
+    Given all batches in the table
+    When the PySpark code aggregates batch status
+    Then output total_batches, total_passed_batches, total_failed_batches
+
+  Scenario: PySpark code for batch QC analysis
+    Given the requirements for product-wise analysis, batch-wise quality status, and batch-wise summary
+    When the PySpark code is executed
+    Then the code must:
+      | Step                                                                                 |
+      | Read the table "purgo_databricks.purgo_playground.batch_qc" into a DataFrame         |
+      | Validate required columns and types                                                  |
+      | Add a column "status" where quality_check_score < 97 is "fail", else "pass"          |
+      | Group by product_name to calculate product-wise batch analysis                       |
+      | Output: product_name, total_batches, passed_batches, failed_batches, percent_passed  |
+      | Output batch-wise quality status: batch_id, product_name, quality_check_score, status|
+      | Aggregate for batch-wise summary: total_batches, total_passed_batches, total_failed_batches|
+      | Output all results as DataFrames without syntax error                                |
+
+  Scenario Outline: Error handling for invalid data
+    Given a row with batch_id "<batch_id>", product_name "<product_name>", quality_check_score <score>
+    When <score> is not numeric
+    Then raise error "Invalid type for quality_check_score in batch <batch_id>"
+
+    Examples:
+      | batch_id   | product_name | score   |
+      | BATCH006   | WidgetD      | "N/A"   |
+      | BATCH007   | WidgetE      | null    |
+
+  Scenario: Output format validation
+    Given the PySpark code produces results
+    When the results are output
+    Then all outputs must be DataFrames with correct columns and types
+
+  Scenario: Summary of outputs
+    Given the analysis is complete
+    Then the outputs are:
+      | Output type                | Columns                                                                 |
+      | Product-wise analysis      | product_name, total_batches, passed_batches, failed_batches, percent_passed |
+      | Batch-wise quality status  | batch_id, product_name, quality_check_score, status                     |
+      | Batch-wise summary         | total_batches, total_passed_batches, total_failed_batches               |
+
+# END
