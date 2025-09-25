@@ -1,124 +1,128 @@
 spark.catalog.setCurrentCatalog("purgo_databricks")
 
-# ------------------------------------------------------------------------------
-# PySpark Script for TAT Calculation: New Enrollment Review Activity
+# -----------------------------------------------------------------------------
+# PySpark Script: Calculate New Enrollment Review TAT and Generate tat_report
 # Unity Catalog: purgo_databricks
 # Schema: purgo_playground
-# Input Tables: pat_case, sr_activity
-# Output Table: tat_report (all columns from pat_case + total_time_elapsed)
+# Source Tables: pat_case, sr_activity
+# Output Table: tat_report
+# 
 # Logic:
-#   - For pat_case records with service_request_type = "Patient Foundation"
-#   - Find sr_activity records with subject = "Perform New Enrollment Review Activity" and status = "Completed"
-#   - For each case_id, get minimum last_modified_date as end_date
-#   - Start date: sr_created_date from pat_case
-#   - total_time_elapsed: number of working days (Mon-Fri) between start_date and end_date (date only)
-#   - If end_date < start_date OR either is NULL, total_time_elapsed = NULL
-#   - If end_date = start_date, total_time_elapsed = 0
-#   - Exclude weekends (Saturday/Sunday) from count
-#   - Only include pat_case records with matching sr_activity (inner join)
-#   - Overwrite tat_report table on each run
-#   - All code is Databricks-compatible and follows best practices
-# ------------------------------------------------------------------------------
+#   - For each pat_case with service_request_type = "Patient Foundation":
+#       - Find related sr_activity records with subject = "Perform New Enrollment Review Activity" and status = "Completed"
+#       - Start date: sr_created_date (date only)
+#       - End date: minimum last_modified_date (date only) for the case_id
+#       - total_time_elapsed:
+#           - NULL if either date is NULL or end < start
+#           - 0 if end = start
+#           - Otherwise, count of business days (Mon-Fri) between start and end, excluding weekends
+#   - Output: All columns from pat_case plus total_time_elapsed (nullable integer)
+#   - Write to tat_report table in overwrite mode
+# -----------------------------------------------------------------------------
 
-# Commented out SparkSession import and initialization (already available in Databricks)
-# from pyspark.sql import SparkSession  # built-in
-# spark = SparkSession.builder.getOrCreate()  # built-in
-
-# Import required PySpark functions and types
+# -- All necessary imports (no SparkSession initialization needed in Databricks)
 from pyspark.sql import functions as F  
-from pyspark.sql.types import IntegerType  
-from pyspark.sql.window import Window  
+from pyspark.sql.types import DateType, IntegerType  
+from datetime import datetime, timedelta  
 
-# ------------------------------------------------------------------------------
-# Helper UDF: Calculate number of working days (Mon-Fri) between two dates
-# Returns:
-#   - Integer (number of working days)
-#   - NULL if either date is NULL or end < start
-#   - 0 if end = start
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# CTE: pat_case_with_dates
+#   - Read pat_case table
+#   - Filter for service_request_type = "Patient Foundation"
+#   - Cast sr_created_date to DateType (NULL if invalid)
+# -----------------------------------------------------------------------------
+pat_case_with_dates = (
+    spark.sql("""
+        SELECT
+            *,
+            TRY_CAST(sr_created_date AS DATE) AS sr_created_date_dt
+        FROM purgo_databricks.purgo_playground.pat_case
+        WHERE service_request_type = 'Patient Foundation'
+    """)
+)
 
-@F.udf(returnType=IntegerType())
-def working_days_udf(start_ts, end_ts):
-    # start_ts, end_ts: TimestampType
-    if start_ts is None or end_ts is None:
+# -----------------------------------------------------------------------------
+# CTE: sr_activity_filtered
+#   - Read sr_activity table
+#   - Filter for subject and status
+#   - Cast last_modified_date to DateType (NULL if invalid)
+# -----------------------------------------------------------------------------
+sr_activity_filtered = (
+    spark.sql("""
+        SELECT
+            case_id,
+            TRY_CAST(last_modified_date AS DATE) AS last_modified_date_dt
+        FROM purgo_databricks.purgo_playground.sr_activity
+        WHERE subject = 'Perform New Enrollment Review Activity'
+          AND status = 'Completed'
+    """)
+)
+
+# -----------------------------------------------------------------------------
+# CTE: min_activity_per_case
+#   - For each case_id, get minimum last_modified_date_dt
+# -----------------------------------------------------------------------------
+min_activity_per_case = (
+    sr_activity_filtered
+    .groupBy("case_id")
+    .agg(F.min("last_modified_date_dt").alias("min_last_modified_date_dt"))
+)
+
+# -----------------------------------------------------------------------------
+# CTE: joined_cases
+#   - Join pat_case_with_dates with min_activity_per_case on case_id (left join)
+# -----------------------------------------------------------------------------
+joined_cases = (
+    pat_case_with_dates
+    .join(min_activity_per_case, on="case_id", how="left")
+)
+
+# -----------------------------------------------------------------------------
+# UDF: business_days_between
+#   - Count business days (Mon-Fri) between start and end dates, inclusive
+#   - Exclude weekends (Saturday, Sunday)
+#   - Exclude start date from count (per requirements)
+# -----------------------------------------------------------------------------
+def business_days_between(start, end):
+    if start is None or end is None:
         return None
-    start_date = start_ts.date()
-    end_date = end_ts.date()
-    if end_date < start_date:
+    if end < start:
         return None
-    if end_date == start_date:
+    if end == start:
         return 0
-    from datetime import timedelta
-    days = 0
-    current = start_date
-    while current < end_date:
-        if current.weekday() < 5:  # 0=Mon, ..., 4=Fri
-            days += 1
+    day_count = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5:  # 0=Monday, 4=Friday
+            day_count += 1
         current += timedelta(days=1)
-    return days
+    return day_count - 1  # Exclude start date
 
-# ------------------------------------------------------------------------------
-# CTE: Filtered sr_activity for subject/status match
-# ------------------------------------------------------------------------------
+business_days_between_udf = F.udf(business_days_between, IntegerType())
 
-filtered_sr_activity_cte = (
-    spark.table("purgo_databricks.purgo_playground.sr_activity")
-    .filter(
-        (F.col("subject") == "Perform New Enrollment Review Activity") &
-        (F.col("status") == "Completed")
+# -----------------------------------------------------------------------------
+# CTE: tat_report_final
+#   - Calculate total_time_elapsed per business rules
+#   - Select all columns from pat_case plus total_time_elapsed
+# -----------------------------------------------------------------------------
+tat_report_final = (
+    joined_cases
+    .withColumn(
+        "total_time_elapsed",
+        business_days_between_udf(F.col("sr_created_date_dt"), F.col("min_last_modified_date_dt"))
+    )
+    # Ensure output columns: all from pat_case plus total_time_elapsed
+    .select(
+        *[col for col in pat_case_with_dates.columns if col not in ("sr_created_date_dt")],
+        "total_time_elapsed"
     )
 )
 
-# ------------------------------------------------------------------------------
-# CTE: For each case_id, get minimum last_modified_date as end_date
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Write tat_report_final to Delta table (overwrite mode)
+# -----------------------------------------------------------------------------
+tat_report_final.write.mode("overwrite").format("delta").saveAsTable("purgo_databricks.purgo_playground.tat_report")
 
-min_last_modified_window = Window.partitionBy("case_id").orderBy(F.col("last_modified_date").asc())
-
-sr_activity_min_cte = (
-    filtered_sr_activity_cte
-    .withColumn("min_last_modified_date", F.min("last_modified_date").over(min_last_modified_window))
-    .groupBy("case_id")
-    .agg(F.min("min_last_modified_date").alias("end_date"))
-)
-
-# ------------------------------------------------------------------------------
-# CTE: Filter pat_case for service_request_type match
-# ------------------------------------------------------------------------------
-
-pat_case_filtered_cte = (
-    spark.table("purgo_databricks.purgo_playground.pat_case")
-    .filter(F.col("service_request_type") == "Patient Foundation")
-)
-
-# ------------------------------------------------------------------------------
-# Join pat_case with sr_activity_min on case_id
-# Calculate total_time_elapsed using working_days_udf
-# ------------------------------------------------------------------------------
-
-tat_joined_df = (
-    pat_case_filtered_cte
-    .join(sr_activity_min_cte, on="case_id", how="inner")
-    .withColumn("total_time_elapsed", working_days_udf(F.col("sr_created_date"), F.col("end_date")))
-)
-
-# ------------------------------------------------------------------------------
-# Select all columns from pat_case plus total_time_elapsed
-# Ensure column order and types match target schema
-# ------------------------------------------------------------------------------
-
-pat_case_columns = [field.name for field in pat_case_filtered_cte.schema.fields]
-tat_report_df = tat_joined_df.select(
-    *pat_case_columns,
-    F.col("total_time_elapsed")
-)
-
-# ------------------------------------------------------------------------------
-# Write tat_report to Unity Catalog (overwrite, Delta Lake)
-# ------------------------------------------------------------------------------
-
-tat_report_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("purgo_databricks.purgo_playground.tat_report")
-
-# -------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # End of script
-# -------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
