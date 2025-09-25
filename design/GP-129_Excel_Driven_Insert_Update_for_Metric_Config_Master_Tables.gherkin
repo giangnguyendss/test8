@@ -1,0 +1,123 @@
+Feature: Upsert metric_config and metric_master tables from Excel data in Databricks SQL
+
+  Background:
+    Given the Excel sheet contains metric_config and metric_master data
+    And the target catalog is purgo_databricks and schema is purgo_playground
+    And the metric_config table's upsert key is metric_id
+    And the metric_master table's upsert key is (metric_template_name, dependency) with NULL-safe match
+
+  # ------------------- metric_config upsert logic -------------------
+
+  Scenario Outline: Upsert metric_config record from Excel data
+    Given a metric_config row with metric_id "<metric_id>" and other columns
+    When checking if metric_id "<metric_id>" exists in purgo_playground.metric_config
+    Then if not exists, insert a new record with all Excel columns
+    And if exists, update the existing record with all Excel columns
+
+    Examples:
+      | metric_id             | active_indicator | metric_data_type | metric_description                       | metric_template_name | metric_type | source_table                                         | table_type | target_table                                         | primary_key   |
+      | evenity_unit_hash     | Y               | String          | hash value of product level, product name | evenity_unit_hash   | Custom     | purgo_playground.s_field_reporting_sales_source_customer | customer   | purgo_playground.s_field_reporting_sales_source_customer_metric | pt_cdl_uuid   |
+      | customer_first_metric | Y               |                 | First purchased columns of a customer     | customer_first_metric| Custom     | purgo_playground.d_product_revenue                    | Product    | purgo_playground.d_product_revenue_metric             | product_id    |
+      | final_css             | Y               | Double          | Normalised Customer Satisfaction Score    | final_css           | Custom     | purgo_playground.health_insurance_claims              | HCP        | purgo_playground.health_insurance_claims_metric        | Claim_ID      |
+      | batch_number          | N               | String          | Batch number of product                   | batch_number         | Custom     | purgo_playground.d_product_revenue                    | Product    | purgo_playground.d_product_revenue_metric             | product_id    |
+
+  Scenario Outline: Validation error on metric_config upsert
+    Given a metric_config row with metric_id "<metric_id>" and column "<column>" value "<value>"
+    When validating the data types and required fields
+    Then if "<column>" is required and "<value>" is missing or invalid
+    Then fail with error "Invalid or missing value for <column> in metric_config for metric_id <metric_id>"
+
+    Examples:
+      | metric_id         | column             | value      |
+      | evenity_unit_hash | active_indicator   |            |
+      | batch_number      | metric_data_type   | 123        |
+      | final_css         | metric_description |            |
+
+  Scenario Outline: Duplicate metric_id in Excel for metric_config
+    Given multiple metric_config rows in Excel with metric_id "<metric_id>"
+    When processing upsert for metric_id "<metric_id>"
+    Then fail with error "Duplicate metric_id <metric_id> in Excel input"
+
+    Examples:
+      | metric_id         |
+      | evenity_unit_hash |
+      | final_css         |
+
+  # ------------------- metric_master upsert logic -------------------
+
+  Scenario Outline: Upsert metric_master record from Excel data
+    Given a metric_master row with metric_template_name "<metric_template_name>", dependency "<dependency>", and other columns
+    When checking if (metric_template_name, dependency) exists in purgo_playground.metric_master (NULL-safe)
+    Then if not exists, insert a new record with all Excel columns
+    And if exists, update the existing record with all Excel columns
+
+    Examples:
+      | metric_template_name   | dependency | sql_query                                                        | metric_type | view_name   |
+      | evenity_unit_hash      | 1          | SELECT * FROM ...                                                | Custom      | eve_view    |
+      | customer_first_metric  | 1          | SELECT product_id, FIRST_VALUE(...) FROM purgo_playground.d_product_revenue | Custom      |             |
+      | final_css              | 2          | SELECT *, CASE WHEN Billed_Amount = 0 THEN 0 ELSE ...            | Custom      | css_data    |
+      | final_css              | 3          | WITH css_stats AS (...) SELECT Claim_ID, CASE WHEN ...           | Custom      |             |
+      | final_css              | 1          | SELECT h.*, c.id, c.purchase_history, c.is_churn FROM ...        | Custom      | joined_data |
+      | evenity_unit_hash      | 2          | SELECT pt_cdl_uuid, HASH(CONCAT_WS(...)) AS evenity_unit_hash FROM eve_view | Custom      |             |
+      | batch_number           | 1          | SELECT product_id, get_json_object(...) FROM purgo_playground.d_product_revenue | Custom      |             |
+
+  Scenario Outline: Validation error on metric_master upsert
+    Given a metric_master row with metric_template_name "<metric_template_name>", dependency "<dependency>", and column "<column>" value "<value>"
+    When validating the data types and required fields
+    Then if "<column>" is required and "<value>" is missing or invalid
+    Then fail with error "Invalid or missing value for <column> in metric_master for metric_template_name <metric_template_name> and dependency <dependency>"
+
+    Examples:
+      | metric_template_name   | dependency | column      | value      |
+      | final_css              | 2          | sql_query   |            |
+      | batch_number           | 1          | metric_type |            |
+      | evenity_unit_hash      | 1          | view_name   | 123        |
+
+  Scenario Outline: Duplicate (metric_template_name, dependency) in Excel for metric_master
+    Given multiple metric_master rows in Excel with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    When processing upsert for (metric_template_name, dependency)
+    Then fail with error "Duplicate (metric_template_name, dependency) <metric_template_name>, <dependency> in Excel input"
+
+    Examples:
+      | metric_template_name   | dependency |
+      | final_css              | 2          |
+      | evenity_unit_hash      | 1          |
+
+  # ------------------- General error handling and SQL generation -------------------
+
+  Scenario: SQL upsert query generation for metric_config
+    Given a valid metric_config row from Excel with metric_id "<metric_id>"
+    When generating Databricks SQL for upsert
+    Then produce a MERGE INTO query using metric_id as the match key
+    And set all columns from Excel as update/insert values
+
+  Scenario: SQL upsert query generation for metric_master
+    Given a valid metric_master row from Excel with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    When generating Databricks SQL for upsert
+    Then produce a MERGE INTO query using (metric_template_name, dependency) as the match key (NULL-safe)
+    And set all columns from Excel as update/insert values
+
+  Scenario Outline: Type mismatch error on upsert
+    Given a row with column "<column>" value "<value>" that does not match expected type "<expected_type>"
+    When validating before upsert
+    Then fail with error "Type mismatch for <column>: expected <expected_type>, got <value>"
+
+    Examples:
+      | column           | value      | expected_type |
+      | dependency       | abc        | Integer       |
+      | active_indicator | 123        | String (Y/N)  |
+      | metric_data_type | 2024-01-01 | String        |
+
+  Scenario Outline: Null/empty string handling on upsert
+    Given a row with column "<column>" value "<value>"
+    When mapping Excel data to table columns
+    Then if "<column>" is nullable, set to NULL in SQL if "<value>" is empty
+    And if "<column>" is not nullable, fail with error "Null value for non-nullable column <column>"
+
+    Examples:
+      | column             | value   | nullable |
+      | metric_description |         | true     |
+      | metric_type        |         | false    |
+      | sql_query          |         | false    |
+
+# END
