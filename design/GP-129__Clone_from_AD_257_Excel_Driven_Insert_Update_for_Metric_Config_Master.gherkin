@@ -1,0 +1,141 @@
+Feature: Upsert metric_config and metric_master tables from Excel data in Databricks SQL
+
+  Background:
+    Given the Excel file "metric_control_table.xlsx" contains sheets "metric_config" and "metric_master"
+    And the target catalog is "purgo_databricks" and schema is "purgo_playground"
+    And the table "metric_config" has primary key "metric_id"
+    And the table "metric_master" has composite key ("metric_template_name", "dependency")
+    And all columns in the Excel sheets map 1:1 to the target tables
+
+  # --- metric_config upsert scenarios ---
+
+  Scenario Outline: Upsert metric_config row from Excel
+    Given a row in the Excel sheet "metric_config" with metric_id "<metric_id>"
+    And all required fields are present and valid types
+    When the upsert SQL is executed
+    Then if "<metric_id>" does not exist in purgo_databricks.purgo_playground.metric_config
+      Then a new row is inserted with all Excel values
+    Else if "<metric_id>" exists
+      Then the existing row is updated with all Excel values
+
+    Examples:
+      | metric_id              | active_indicator | metric_data_type | metric_description                  |
+      | evenity_unit_hash      | Y               | String          | hash value of product level, ...    |
+      | customer_first_metric  | Y               |                 | First purchased columns of a ...    |
+      | final_css              | Y               | Double          | Normalised Customer Satisfaction... |
+      | batch_number           | N               | String          | Batch number of product             |
+
+  Scenario Outline: Upsert metric_config with missing required field
+    Given a row in the Excel sheet "metric_config" with metric_id "<metric_id>"
+    And the required field "<missing_field>" is missing or null
+    When the upsert SQL is executed
+    Then an error is raised: "Missing required field <missing_field> for metric_id <metric_id>"
+
+    Examples:
+      | metric_id             | missing_field         |
+      | evenity_unit_hash     | metric_id             |
+      | final_css             | metric_description    |
+      | batch_number          | metric_template_name  |
+
+  Scenario Outline: Upsert metric_config with invalid data type
+    Given a row in the Excel sheet "metric_config" with metric_id "<metric_id>"
+    And the field "<field>" has invalid type "<invalid_value>"
+    When the upsert SQL is executed
+    Then an error is raised: "Invalid type for <field> in metric_id <metric_id>: expected <expected_type>"
+
+    Examples:
+      | metric_id             | field             | invalid_value | expected_type |
+      | evenity_unit_hash     | metric_data_type  | 123           | String        |
+      | final_css             | active_indicator  | 5             | String (Y/N)  |
+      | batch_number          | metric_type       | 100           | String        |
+
+  Scenario Outline: Upsert metric_config with duplicate metric_id in Excel
+    Given the Excel sheet "metric_config" contains duplicate rows with metric_id "<metric_id>"
+    When the upsert SQL is executed
+    Then an error is raised: "Duplicate metric_id <metric_id> in Excel input"
+
+    Examples:
+      | metric_id             |
+      | final_css             |
+      | batch_number          |
+
+  # --- metric_master upsert scenarios ---
+
+  Scenario Outline: Upsert metric_master row from Excel
+    Given a row in the Excel sheet "metric_master" with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    And all required fields are present and valid types
+    When the upsert SQL is executed
+    Then if the combination ("<metric_template_name>", "<dependency>") does not exist in purgo_databricks.purgo_playground.metric_master
+      Then a new row is inserted with all Excel values
+    Else if the combination exists
+      Then the existing row is updated with all Excel values
+
+    Examples:
+      | metric_template_name   | dependency |
+      | evenity_unit_hash      | 1         |
+      | evenity_unit_hash      | 2         |
+      | customer_first_metric  | 1         |
+      | final_css              | 1         |
+      | final_css              | 2         |
+      | final_css              | 3         |
+      | batch_number           | 1         |
+
+  Scenario Outline: Upsert metric_master with missing required field
+    Given a row in the Excel sheet "metric_master" with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    And the required field "<missing_field>" is missing or null
+    When the upsert SQL is executed
+    Then an error is raised: "Missing required field <missing_field> for metric_template_name <metric_template_name>, dependency <dependency>"
+
+    Examples:
+      | metric_template_name   | dependency | missing_field    |
+      | evenity_unit_hash      | 1         | metric_template_name |
+      | final_css              | 2         | sql_query        |
+      | batch_number           | 1         | metric_type      |
+
+  Scenario Outline: Upsert metric_master with invalid data type
+    Given a row in the Excel sheet "metric_master" with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    And the field "<field>" has invalid type "<invalid_value>"
+    When the upsert SQL is executed
+    Then an error is raised: "Invalid type for <field> in metric_template_name <metric_template_name>, dependency <dependency>: expected <expected_type>"
+
+    Examples:
+      | metric_template_name   | dependency | field        | invalid_value | expected_type |
+      | evenity_unit_hash      | 1         | dependency   | "abc"         | Integer       |
+      | final_css              | 2         | sql_query    | 123           | String        |
+      | batch_number           | 1         | metric_type  | 100           | String        |
+
+  Scenario Outline: Upsert metric_master with duplicate key in Excel
+    Given the Excel sheet "metric_master" contains duplicate rows with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    When the upsert SQL is executed
+    Then an error is raised: "Duplicate key (metric_template_name, dependency) = (<metric_template_name>, <dependency>) in Excel input"
+
+    Examples:
+      | metric_template_name   | dependency |
+      | final_css              | 2         |
+      | evenity_unit_hash      | 1         |
+
+  # --- General validation and error handling ---
+
+  Scenario: Upsert with table schema mismatch
+    Given the Excel sheet contains a column "<extra_column>" not present in the target table
+    When the upsert SQL is executed
+    Then an error is raised: "Column <extra_column> not found in target table schema"
+
+  Scenario: Upsert with null-safe key matching in metric_master
+    Given a row in the Excel sheet "metric_master" with metric_template_name "<metric_template_name>" and dependency "<dependency>"
+    And dependency is NULL in either Excel or target table
+    When the upsert SQL is executed
+    Then key matching uses IS NULL semantics for dependency
+
+  Scenario: Upsert with transaction failure
+    Given a batch upsert operation for multiple rows
+    And a row fails validation
+    When the upsert SQL is executed
+    Then the operation is rolled back and no rows are inserted or updated
+
+  Scenario: Upsert with empty Excel sheet
+    Given the Excel sheet "<sheet_name>" is empty
+    When the upsert SQL is executed
+    Then no changes are made to the target table
+
+# END
