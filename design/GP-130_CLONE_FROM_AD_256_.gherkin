@@ -1,0 +1,123 @@
+Feature: Real-time streaming of patient data from Purgo S3 to patient_data_auto_loader table
+
+  Background:
+    Given the Unity Catalog is "purgo_databricks"
+    And the Unity Catalog Schema is "purgo_playground"
+    And the target table is "patient_data_auto_loader"
+    And the CSV schema is: patient_id, patient_name, age, diagnosis, treatment
+    And all columns are read as String type except "data_loaded_at" which is a timestamp
+    And the schema location is "/mnt/checkpoints/s3_autoloader/patient_al_schema"
+    And the checkpoint location is "/mnt/checkpoints/patient_al_cp/"
+    And Spark is configured to access S3 using access_key and secret_key from Databricks secret scope "aws_keys"
+    And the S3 folder path is dynamically retrieved from the "s3_landing_path" column of "ingest_config_master" table where "source_object_name" contains "patient_data"
+
+  Scenario: Successful streaming and ingestion of patient data
+    Given the "ingest_config_master" table contains a row with "source_object_name" containing "patient_data"
+    And the S3 path is valid and accessible
+    And the Databricks secret scope "aws_keys" contains valid "access_key" and "secret_key"
+    When the streaming job starts
+    And new CSV files arrive in the S3 folder
+    Then each CSV file is read with columns: patient_id, patient_name, age, diagnosis, treatment
+    And all columns are cast to String type
+    And a new column "data_loaded_at" is added with the current ingestion timestamp
+    And the data is appended to the "patient_data_auto_loader" table
+    And the streaming state is checkpointed at "/mnt/checkpoints/patient_al_cp/"
+    And the schema is managed at "/mnt/checkpoints/s3_autoloader/patient_al_schema"
+
+  Scenario Outline: Validation of CSV data types and required columns
+    Given a CSV file with columns: <columns>
+    When the file is processed by the autoloader
+    Then the following validation rules are applied:
+      | Rule                                      | Expected Outcome                |
+      | All columns present                       | Pass if all required columns    |
+      | All columns cast to String                | Pass if type conversion succeeds|
+      | "data_loaded_at" added as timestamp       | Pass if timestamp is valid      |
+    And if any required column is missing, an error is raised: "Missing required column: <missing_column>"
+    And if type conversion fails, an error is raised: "Type mismatch in column: <column>"
+
+    Examples:
+      | columns                                 | missing_column | column      |
+      | patient_id,patient_name,age,diagnosis,treatment |             |            |
+      | patient_id,patient_name,diagnosis,treatment     | age         |            |
+      | patient_id,patient_name,age,diagnosis           | treatment   |            |
+      | patient_id,patient_name,age,diagnosis,treatment |            | age        |
+
+  Scenario Outline: Error handling for S3 path and credentials
+    Given the "ingest_config_master" table <config_master_state>
+    And the Databricks secret scope "aws_keys" <secret_scope_state>
+    When the streaming job starts
+    Then the following error conditions are handled:
+      | Condition                        | Error Message                                 |
+      | S3 path missing                  | "S3 path not found for patient_data source"   |
+      | S3 path inaccessible             | "Unable to access S3 path: <s3_path>"         |
+      | access_key missing               | "Missing access_key in secret scope aws_keys" |
+      | secret_key missing               | "Missing secret_key in secret scope aws_keys" |
+      | access_key invalid               | "Invalid access_key for S3 access"            |
+      | secret_key invalid               | "Invalid secret_key for S3 access"            |
+
+    Examples:
+      | config_master_state         | secret_scope_state         | s3_path         |
+      | missing patient_data row    | valid keys                 |                 |
+      | valid patient_data row      | missing access_key         | s3://purgo/...  |
+      | valid patient_data row      | missing secret_key         | s3://purgo/...  |
+      | valid patient_data row      | invalid access_key         | s3://purgo/...  |
+      | valid patient_data row      | invalid secret_key         | s3://purgo/...  |
+      | valid patient_data row      | valid keys                 | inaccessible    |
+
+  Scenario Outline: Handling duplicate records in streaming ingestion
+    Given a CSV file contains duplicate records with the same patient_id
+    When the file is processed
+    Then the duplicates are appended as-is to "patient_data_auto_loader"
+    And a warning is logged: "Duplicate patient_id detected: <patient_id>"
+    And no error is raised
+
+    Examples:
+      | patient_id |
+      | P123       |
+      | P456       |
+
+  Scenario Outline: Handling malformed CSV files
+    Given a CSV file is malformed with <malformation_type>
+    When the file is processed
+    Then an error is raised: "<error_message>"
+    And the file is skipped
+
+    Examples:
+      | malformation_type         | error_message                                 |
+      | missing header           | "CSV file missing header row"                  |
+      | extra columns            | "Unexpected columns in CSV file"               |
+      | inconsistent row length  | "Row length mismatch in CSV file"              |
+      | invalid delimiter        | "Invalid CSV delimiter detected"               |
+
+  Scenario: Checkpoint and schema location validation
+    Given the checkpoint location "/mnt/checkpoints/patient_al_cp/" is accessible
+    And the schema location "/mnt/checkpoints/s3_autoloader/patient_al_schema" is accessible
+    When the streaming job starts
+    Then streaming state is saved at the checkpoint location
+    And schema evolution is managed at the schema location
+
+  Scenario: Table existence and creation
+    Given the "patient_data_auto_loader" table does not exist in "purgo_databricks.purgo_playground"
+    When the streaming job starts
+    Then the table is created with columns:
+      | Column         | Type      |
+      | patient_id     | String    |
+      | patient_name   | String    |
+      | age            | String    |
+      | diagnosis      | String    |
+      | treatment      | String    |
+      | data_loaded_at | Timestamp |
+    And the table is ready for data append
+
+  Scenario Outline: Data governance and retention
+    Given data is ingested into "patient_data_auto_loader"
+    When retention policy is applied
+    Then data older than <retention_period> is purged
+    And checkpoint and schema files older than <retention_period> are deleted
+
+    Examples:
+      | retention_period |
+      | 30 days         |
+      | 90 days         |
+
+# END
